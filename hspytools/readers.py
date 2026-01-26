@@ -56,15 +56,19 @@ class HTPAdGUI_FileReader():
         with open(path) as file:
             header = file.readline()
         
+        # Get ArrayType from header
+        arraytype = self._get_header_info(header)['ArrayType']
+            
+        # Set tparray attribute according to header info 
+        self.tparray = TPArray(ArrayType = arraytype)
+        
         # Use pandas' read_csv() method to read in the rest of the file
         sep = kwargs.pop('sep',' ')
         skiprows = kwargs.pop('skiprows',1)
         
         # Get columns names
         columns = self.tparray.get_serial_data_order()
-        
-        raise Exception('Header must be read in here to extract ArrayType!!')
-        
+       
         # Read txt with pandas to DataFrame
         txt_content = pd.read_csv(path,
                                   sep=sep,
