@@ -1,10 +1,4 @@
-from . import tparray
-from . import readers
-from . import LuT
-from . import helpers
-from . import hdf5_mgr
+import sys
+import hspy
 
-from . import ipc
-from . import cv
-from . import clust
-from . import arraytypes
+sys.modules[__name__] = hspy
