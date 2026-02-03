@@ -263,7 +263,7 @@ class HTPA_Undistorter:
         
         # Place distorted image in the center of a new array of the same
         # dimension as the undistorted image
-        img_src = np.ones(map_x.shape)*fill
+        img_src = np.ones(map_x.shape)*np.nan
         
         h_dist,w_dist = img_distorted.shape
         h_undist,w_unddist = img_src.shape

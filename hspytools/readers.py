@@ -85,8 +85,7 @@ class HTPAdGUI_FileReader():
         # rename index appropriately
         txt_content.index = range(0,len(txt_content))
         txt_content.index.name = 'image_id'
-        
-        
+                
         return txt_content, header
     
     def _import_bds(self,bds_path,**kwargs):

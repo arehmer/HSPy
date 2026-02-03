@@ -622,10 +622,10 @@ class TPArray():
         pixel_dtype = df_meas[self._pix].dtypes
         
         # Get stuff for calculation
-        ThGrad = self._bcc['thGrad'].reshape(size)
+        ThGrad = self.BCC['thGrad'].reshape(size)
         # avgPtat = df_meas[self._PTAT].mean().item()
-        gradScale = self._bcc['gradScale']
-        ThOffset = self._bcc['thOff'].reshape(size)
+        gradScale = self.BCC['gradScale']
+        ThOffset = self.BCC['thOff'].reshape(size)
         
         
         if (self.width,self.height) == (8,8):
@@ -685,7 +685,7 @@ class TPArray():
                                ElOff_lower_half])
             
         elif self._DevConst['NROFPTAT']==1:
-            # print('Yet to be implemented! Ask Bodo or Christoph!')
+            raise NotImplementedError('Yet to be implemented! Ask Bodo or Christoph!')
             pass
         
         V_el_comp = Pixel.values - ElOff.values
@@ -702,17 +702,17 @@ class TPArray():
         pixel_dtype = df_meas[self._pix].dtypes
         
         # Get stuff for calculation
-        vddCompGrad = self._bcc['vddCompGrad']
-        vddCompOff = self._bcc['vddCompOff']
-        vddScOff = self._bcc['vddScOff'].item()
-        vddScGrad = self._bcc['vddScGrad'].item()
+        vddCompGrad = self.BCC['vddCompGrad']
+        vddCompOff = self.BCC['vddCompOff']
+        vddScOff = self.BCC['vddScOff'].item()
+        vddScGrad = self.BCC['vddScGrad'].item()
 
 
         vdd_av = df_meas[self._vdd].values.item()
-        vdd_th1 = self._bcc['vddMeas_th1']
-        vdd_th2 = self._bcc['vddMeas_th2']
-        ptat_th1 = self._bcc['ptat_th1']
-        ptat_th2 = self._bcc['ptat_th2']
+        vdd_th1 = self.BCC['avgVDD_ThCalib_@(Ta1,Vdd2)']
+        vdd_th2 = self.BCC['avgVDD_ThCalib_@(Ta2,Vdd2)']
+        ptat_th1 = self.BCC['avgPTAT_ThCalib_@(Ta1,Vdd2)']
+        ptat_th2 = self.BCC['avgPTAT_ThCalib_@(Ta2,Vdd2)']
         ptat_av = df_meas[self._PTAT].mean()
 
         # Replicate vddCompGrad and vddCompOff according to their
@@ -761,11 +761,11 @@ class TPArray():
 
         
         # Get stuff for calculation
-        Pij = self._bcc['pij']
-        PixCmin = self._bcc['pixcmin']
-        PixCmax = self._bcc['pixcmax']
-        GlobGain = self._bcc['globalGain']
-        eps = self._bcc['epsilon']
+        Pij = self.BCC['pij']
+        PixCmin = self.BCC['pixcmin']
+        PixCmax = self.BCC['pixcmax']
+        GlobGain = self.BCC['globalGain']
+        eps = self.BCC['epsilon']
         
         
         # Calculate Sensitivity coefficients
