@@ -350,7 +350,7 @@ class TPArray():
             DevConst['NROFBLOCKS'] = 6
             DevConst['NROFPTAT'] = 2
             
-            warnings.warning('ArrayType not fully implemented!')
+            warnings.warn('ArrayType not fully implemented!')
             
             # self._package_num = 30
             # self._package_size = 1401
