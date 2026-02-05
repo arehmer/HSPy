@@ -364,7 +364,7 @@ class TPArray():
             # path to array data
             # path = Path(__file__).parent / 'arraytypes' / '160x120.json'
             # Load calibration data from file
-            self._load_calib_json(path)
+            # self._load_calib_json(path)
         
         else:
             raise Exception('This Thermopile Array is not known.') 
