@@ -345,6 +345,27 @@ class TPArray():
             # Load calibration data from file
             self._load_calib_json(path)
             
+        elif (self.width,self.height) == (80,60):
+            DevConst['ATCaddr'] = 1
+            DevConst['NROFBLOCKS'] = 6
+            DevConst['NROFPTAT'] = 2
+            
+            warnings.warning('ArrayType not fully implemented!')
+            
+            # self._package_num = 30
+            # self._package_size = 1401
+            # self._fs = 25
+            # self._NETD = 110
+            # self.Pitch = 45.0e-6        #equal for r1
+            # self.Ampl = 60              #40 for r1         
+            
+            # self._mask = np.ones(self._npsize)
+            
+            # path to array data
+            # path = Path(__file__).parent / 'arraytypes' / '160x120.json'
+            # Load calibration data from file
+            self._load_calib_json(path)
+        
         else:
             raise Exception('This Thermopile Array is not known.') 
          
