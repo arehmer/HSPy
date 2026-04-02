@@ -4,7 +4,7 @@ with open("config/requirements.txt") as requirement_file:
     requirements = [line.rstrip() for line in requirement_file]
 
 setup(
-    name="HSPyTools",
+    name="HSPy",
     description="A simple package.",
     version="1.0.0",
     author="Name",
