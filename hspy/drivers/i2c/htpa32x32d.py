@@ -891,11 +891,17 @@ class HTPA32x32d:
             chunk    = min(length, MAX_CHUNK)
             addr_msb = (mem_addr >> 8) & 0xFF
             addr_lsb =  mem_addr       & 0xFF
-
+            
+            # Construct message to send
             msg_w = i2c_msg.write(self._eep_addr, [addr_msb, addr_lsb])
+            
+            # Construct message object that answer is writting back to
             msg_r = i2c_msg.read(self._eep_addr, chunk)
+            
+            # Send message and read answer
             self._bus.i2c_rdwr(msg_w, msg_r)
 
+            print(f'msg_r: {msg_r}')
             result   += list(msg_r)
             mem_addr += chunk
             length   -= chunk
