@@ -8,3 +8,4 @@ from . import ipc
 from . import cv
 from . import clust
 from . import arraytypes
+from . import drivers
