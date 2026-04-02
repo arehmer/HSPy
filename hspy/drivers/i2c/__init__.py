@@ -1,1 +1,1 @@
-from . import HTPA32x32d
+from .htpa32x32d import HTPA32x32d
