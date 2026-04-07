@@ -637,7 +637,7 @@ class HTPA32x32d:
 
     def read_status(self) -> int:
         """Return the raw 8-bit status register value."""
-        write_msg = i2c_msg.write(_ADDR_SENSOR, _CMD_STATUS)
+        write_msg = i2c_msg.write(_ADDR_SENSOR, [_CMD_STATUS])
         read_msg = i2c_msg.read(_ADDR_SENSOR, 1)
         
         self._bus.i2c_rdwr(write_msg, read_msg)
