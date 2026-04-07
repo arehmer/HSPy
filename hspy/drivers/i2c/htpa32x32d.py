@@ -904,7 +904,6 @@ class HTPA32x32d:
             # Send message and read answer
             self._bus.i2c_rdwr(msg_w, msg_r)
 
-            print(f'msg_r: {msg_r}')
             result   += list(msg_r)
             mem_addr += chunk
             length   -= chunk
