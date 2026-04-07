@@ -69,7 +69,7 @@ _BIT_VDD_MEAS = (1 << 2)  # 1 = measure VDD instead of PTAT
 _BIT_START    = (1 << 3)  # trigger conversion
 
 # ── Status register bit positions (Table 7) ───────────────────────────────────
-_BIT_EOC = (1 << 0)  # End-of-conversion
+_BIT_EOC = (1 << 0)  # End-of-conversion bitwise mask
 
 # ── EEPROM memory map (Figure 12 of datasheet) ────────────────────────────────
 _EEP_PIXCMIN      = 0x0000   # float32  minimum sensitivity coefficient
@@ -642,7 +642,7 @@ class HTPA32x32d:
         
         self._bus.i2c_rdwr(write_msg, read_msg)
         
-        status_byte = read_msg.buf[0]
+        status_byte = int.from_bytes(read_msg.buf[0])
       
         return status_byte
 
