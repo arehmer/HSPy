@@ -541,6 +541,9 @@ class HTPA32x32d:
         c["vddcompoff"]    = i16_arr(_EEP_VDDCOMPOFF,  256)
 
         self._calib = c
+        
+        print('Calibration constants read from EEPROM:')
+        print(c)
 
     def load_lut(
         self,
