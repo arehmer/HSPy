@@ -21,7 +21,7 @@ Recommended external circuit (Section 6):
 import struct
 import time
 from typing import List, Optional
-
+import smbus2
 # ---------------------------------------------------------------------------
 # Attempt to import smbus2; fall back to a stub so the module can be imported
 # on non-Linux hosts for testing / offline use.
@@ -637,8 +637,14 @@ class HTPA32x32d:
 
     def read_status(self) -> int:
         """Return the raw 8-bit status register value."""
-        self._write_register(_CMD_STATUS, 0x00)   # write command byte
-        return self._bus.read_byte(self._addr)     # repeated read
+        write_msg = i2c_msg.write(_ADDR_SENSOR, _CMD_STATUS)
+        read_msg = i2c_msg.read(_ADDR_SENSOR, 1)
+        
+        self._bus.i2c_rdwr(write_msg, read_msg)
+        
+        status_byte = read_msg.buf[0]
+      
+        return status_byte
 
     def is_eoc(self) -> bool:
         """True when the End-of-Conversion flag is set."""
