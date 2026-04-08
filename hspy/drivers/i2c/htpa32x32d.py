@@ -62,48 +62,52 @@ _CMD_TRIM7    = 0x09  # Trim Reg 7: PU_SDA/SCL_TRIM
 _CMD_READ_TOP = 0x0A  # Read top-half array data  (258 bytes)
 _CMD_READ_BOT = 0x0B  # Read bottom-half array data (258 bytes)
 
-# ── Configuration register bit positions (Table 6) ────────────────────────────
+# ── Configuration register bit positions (Table 6) ───────────────────────────
 _BIT_WAKEUP   = (1 << 0)  # 1 = on, 0 = sleep
 _BIT_BLIND    = (1 << 1)  # 1 = sample electrical offsets
 _BIT_VDD_MEAS = (1 << 2)  # 1 = measure VDD instead of PTAT
 _BIT_START    = (1 << 3)  # trigger conversion
 
+# ── MBIT+REFCAL bit masks ───────────────────────────
+_BITMASK_MBIT   = (1 << 4) - 1
+_BITMASK_REFCAL = ((1 << 2) - 1) << 4
+
 # ── Status register bit positions (Table 7) ───────────────────────────────────
 _BIT_EOC = (1 << 0)  # End-of-conversion bitwise mask
 
 # ── EEPROM memory map (Figure 12 of datasheet) ────────────────────────────────
-_EEP_PIXCMIN      = 0x0000   # float32  minimum sensitivity coefficient
-_EEP_PIXCMAX      = 0x0004   # float32  maximum sensitivity coefficient
-_EEP_GRADSCALE    = 0x0008   # uint8    thermal gradient scaling exponent
-_EEP_EPSILON      = 0x000D   # uint8    emissivity (100 = 1.00)
-_EEP_MBIT_CALIB   = 0x001A   # uint8    MBIT used during factory calibration
-_EEP_BIAS_CALIB   = 0x001B   # uint8
-_EEP_CLK_CALIB    = 0x001C   # uint8
-_EEP_BPA_CALIB    = 0x001D   # uint8
-_EEP_PU_CALIB     = 0x001E   # uint8
-_EEP_VDDTH1       = 0x0026   # uint16 LE  supply voltage at calibration temp 1
-_EEP_VDDTH2       = 0x0028   # uint16 LE  supply voltage at calibration temp 2
-_EEP_PTAT_GRAD    = 0x0034   # float32
-_EEP_PTAT_OFFSET  = 0x0038   # float32
-_EEP_PTAT_TH1     = 0x003C   # uint16 LE  PTAT at calibration temp 1
-_EEP_PTAT_TH2     = 0x003E   # uint16 LE  PTAT at calibration temp 2
-_EEP_VDDSCGRAD    = 0x004E   # uint8    VddComp gradient scaling exponent
-_EEP_VDDSCOFF     = 0x004F   # uint8    VddComp offset scaling exponent
-_EEP_GLOBAL_OFF   = 0x0054   # int8     global object temperature offset
-_EEP_GLOBAL_GAIN  = 0x0055   # uint16 LE
-_EEP_MBIT_USER    = 0x0060   # uint8    user-settable trim copies
-_EEP_BIAS_USER    = 0x0061
-_EEP_CLK_USER     = 0x0062
-_EEP_BPA_USER     = 0x0063
-_EEP_PU_USER      = 0x0064
-_EEP_NR_DEF_PIX   = 0x007F   # uint8    number of dead pixels (0-5)
-_EEP_DEADPIX_ADR  = 0x0080   # 5 x uint16 LE  dead pixel addresses
-_EEP_DEADPIX_MASK = 0x008A   # 5 x uint8      neighbour mask per dead pixel
-_EEP_VDDCOMPGRAD  = 0x0340   # 256 x int16 LE
-_EEP_VDDCOMPOFF   = 0x0540   # 256 x int16 LE
-_EEP_THGRAD       = 0x0740   # 1024 x int16 LE  thermal gradient per pixel
-_EEP_THOFFSET     = 0x0F40   # 1024 x int16 LE  thermal offset per pixel
-_EEP_PIJ          = 0x1740   # 1024 x uint16 LE sensitivity coefficient
+_EEP_PIXCMIN            = 0x0000   # float32  minimum sensitivity coefficient
+_EEP_PIXCMAX            = 0x0004   # float32  maximum sensitivity coefficient
+_EEP_GRADSCALE          = 0x0008   # uint8    thermal gradient scaling exponent
+_EEP_EPSILON            = 0x000D   # uint8    emissivity (100 = 1.00)
+_EEP_MBITREFCAL_CALIB   = 0x001A   # uint8    MBIT used during factory calibration
+_EEP_BIAS_CALIB         = 0x001B   # uint8s
+_EEP_CLK_CALIB          = 0x001C   # uint8
+_EEP_BPA_CALIB          = 0x001D   # uint8
+_EEP_PU_CALIB           = 0x001E   # uint8
+_EEP_VDDTH1             = 0x0026   # uint16 LE  supply voltage at calibration temp 1
+_EEP_VDDTH2             = 0x0028   # uint16 LE  supply voltage at calibration temp 2
+_EEP_PTAT_GRAD          = 0x0034   # float32
+_EEP_PTAT_OFFSET        = 0x0038   # float32
+_EEP_PTAT_TH1           = 0x003C   # uint16 LE  PTAT at calibration temp 1
+_EEP_PTAT_TH2           = 0x003E   # uint16 LE  PTAT at calibration temp 2
+_EEP_VDDSCGRAD          = 0x004E   # uint8    VddComp gradient scaling exponent
+_EEP_VDDSCOFF           = 0x004F   # uint8    VddComp offset scaling exponent
+_EEP_GLOBAL_OFF         = 0x0054   # int8     global object temperature offset
+_EEP_GLOBAL_GAIN        = 0x0055   # uint16 LE
+_EEP_MBITREFCAL_USER    = 0x0060   # uint8    user-settable trim copies
+_EEP_BIAS_USER          = 0x0061
+_EEP_CLK_USER           = 0x0062
+_EEP_BPA_USER           = 0x0063
+_EEP_PU_USER            = 0x0064
+_EEP_NR_DEF_PIX         = 0x007F   # uint8    number of dead pixels (0-5)
+_EEP_DEADPIX_ADR        = 0x0080   # 5 x uint16 LE  dead pixel addresses
+_EEP_DEADPIX_MASK       = 0x008A   # 5 x uint8      neighbour mask per dead pixel
+_EEP_VDDCOMPGRAD        = 0x0340   # 256 x int16 LE
+_EEP_VDDCOMPOFF         = 0x0540   # 256 x int16 LE
+_EEP_THGRAD             = 0x0740   # 1024 x int16 LE  thermal gradient per pixel
+_EEP_THOFFSET           = 0x0F40   # 1024 x int16 LE  thermal offset per pixel
+_EEP_PIJ                = 0x1740   # 1024 x uint16 LE sensitivity coefficient
 
 # ── Array geometry ────────────────────────────────────────────────────────────
 _ROWS      = 32
@@ -226,14 +230,14 @@ class HTPA32x32d:
 
         # Step 3 – write trim registers
         key  = "calib" if use_calib_settings else "user"
-        mbit = self._calib[f"mbit_{key}"]
-        bias = self._calib[f"bias_{key}"]
-        clk  = self._calib[f"clk_{key}"]
-        bpa  = self._calib[f"bpa_{key}"]
-        pu   = self._calib[f"pu_{key}"]
+        mbitrefcal = self._calib[f"mbitrefcal_{key}"]
+        bias       = self._calib[f"bias_{key}"]
+        clk        = self._calib[f"clk_{key}"]
+        bpa        = self._calib[f"bpa_{key}"]
+        pu         = self._calib[f"pu_{key}"]
 
         for cmd, val in [
-            (_CMD_TRIM1, mbit),
+            (_CMD_TRIM1, mbitrefcal),
             (_CMD_TRIM2, bias),   # BIAS_TRIM_TOP
             (_CMD_TRIM3, bias),   # BIAS_TRIM_BOT  (same value)
             (_CMD_TRIM4, clk),
@@ -565,7 +569,14 @@ class HTPA32x32d:
         def u16_arr(addr: int, n: int) -> List[int]:
             raw = self._eeprom_read(addr, n * 2)
             return list(struct.unpack_from(f"<{n}H", bytes(raw)))
+        
+        def unpack_mbit(mbit_raw:int) -> int:
+            mbit = mbit_raw & _BITMASK_MBIT
+            return mbit
 
+        def unpack_refcal(mbit_raw:int) -> int:
+            refcal = (mbit_raw & _BITMASK_REFCAL) >> 4
+            return refcal
         # Scalar values
         c["pixcmin"]       = f32(_EEP_PIXCMIN)
         c["pixcmax"]       = f32(_EEP_PIXCMAX)
@@ -573,18 +584,22 @@ class HTPA32x32d:
         c["epsilon"]       = u8 (_EEP_EPSILON)
 
         # Factory calibration trim settings
-        c["mbit_calib"]    = u8 (_EEP_MBIT_CALIB)
-        c["bias_calib"]    = u8 (_EEP_BIAS_CALIB)
-        c["clk_calib"]     = u8 (_EEP_CLK_CALIB)
-        c["bpa_calib"]     = u8 (_EEP_BPA_CALIB)
-        c["pu_calib"]      = u8 (_EEP_PU_CALIB)
+        c["mbitrefcal_calib"]   = u8 (_EEP_MBITREFCAL_CALIB)
+        c["mbit_calib"]         = unpack_mbit(c["mbitrefcal_calib"])
+        c["refcal_calib"]       = unpack_refcal(c["mbitrefcal_calib"])
+        c["bias_calib"]         = u8 (_EEP_BIAS_CALIB)
+        c["clk_calib"]          = u8 (_EEP_CLK_CALIB)
+        c["bpa_calib"]          = u8 (_EEP_BPA_CALIB)
+        c["pu_calib"]           = u8 (_EEP_PU_CALIB)
 
         # User trim settings
-        c["mbit_user"]     = u8 (_EEP_MBIT_USER)
-        c["bias_user"]     = u8 (_EEP_BIAS_USER)
-        c["clk_user"]      = u8 (_EEP_CLK_USER)
-        c["bpa_user"]      = u8 (_EEP_BPA_USER)
-        c["pu_user"]       = u8 (_EEP_PU_USER)
+        c["mbitrefcal_user"]    = u8 (_EEP_MBITREFCAL_USER)
+        c["mbit_calib"]         = unpack_mbit(c["mbitrefcal_user"])
+        c["refcal_calib"]       = unpack_refcal(c["mbitrefcal_user"])
+        c["bias_user"]          = u8 (_EEP_BIAS_USER)
+        c["clk_user"]           = u8 (_EEP_CLK_USER)
+        c["bpa_user"]           = u8 (_EEP_BPA_USER)
+        c["pu_user"]            = u8 (_EEP_PU_USER)
 
         # PTAT / VDD calibration values
         c["ptat_gradient"] = f32(_EEP_PTAT_GRAD)
