@@ -117,6 +117,9 @@ _PCSCALEVAL      = 1e8    # Section 12.5
 _T_INTER_REG_MS  = 5      # min delay between writing trim registers
 _T_WAKEUP_US     = 80     # wakeup time after WAKEUP command (Table 5)
 _T_POLL_MS       = 1      # EOC polling interval
+_Tbuf            = 0.5    # µs,  time between STOP / START  
+_F_CLK_MIN       = 1      # MHz, min. clock frequency
+_F_CLK_MAX       = 13     # MHz, max. clock frequency
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +175,10 @@ class HTPA32x32d:
         self._vdd_stack:  List[float] = []
         self._el_offset_stack: List[List[int]] = []
         self._stack_depth = 8
-
+        
+        # Open the I2C bus
+        self.open()
+        
     def __enter__(self) -> "HTPA32x32d":
         self.open()
         return self
@@ -237,6 +243,23 @@ class HTPA32x32d:
         ]:
             self._write_register(cmd, val)
             time.sleep(_T_INTER_REG_MS * 1e-3)
+            
+        # Step 4 - calculate approximative conversion time
+        self._calc_conversion_time(use_calib_settings)
+        
+    def _calc_conversion_time(self,use_calib_settings: bool):
+        
+        key  = "calib" if use_calib_settings else "user"
+        MBIT = self._calib[f"mbit_{key}"]
+        CLK_TRIM = self._calib[f"clk_{key}"]
+        
+        F_CLK = (_F_CLK_MIN + (_F_CLK_MAX-_F_CLK_MIN) / 63 * CLK_TRIM)
+        
+        t_fr4 = 32*(2**MBIT + 4) / F_CLK
+        
+        self._calib["F_CLK"] = F_CLK
+        self._calib["t_fr4"] = t_fr4
+
 
     def sleep(self) -> None:
         """Put sensor into sleep state (~9 µA standby current)."""
@@ -247,7 +270,33 @@ class HTPA32x32d:
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP)
         time.sleep(_T_WAKEUP_US * 1e-6)
 
-    # ── Frame readout ─────────────────────────────────────────────────────────
+    # ── Continuous frame readout  ────────────────────────────────────────────
+    def read_stream(self):
+        """
+        Acquire complete frames in a loop
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        k = 0                                       # frame counter
+        t_fr4 = self._calib["t_fr4"]                # ms, block conversion time
+        
+        while True:
+            
+            htpa_data = self.read_frame()
+        
+        read_frame
+        
+        # ── Read electrical offsets (Section 12.3) ────────────────────────
+        el_offsets = self._read_electrical_offsets()
+        
+        
+        
+
+    # ── Single Frame readout ─────────────────────────────────────────────────
 
     def read_frame(self, measure_vdd: bool = False) -> dict:
         """
@@ -270,71 +319,96 @@ class HTPA32x32d:
           "el_offsets" - list[256]  electrical offset digits (uint16)
           "ptat_av"    - PTAT average from the stack (float)
           "vdd_av"     - VDD average from the stack  (float or None)
+          "time"       - time.time() at function return
         """
-        raw_pixels: List[int] = [0] * _PIXELS
-        ptat_samples: List[float] = []
+        pixels: dict[int, dict[str, list[int]]] = \
+            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
+             for b in range(4)}
+                                        
+        ptat: List[float] = []
+        vdd: List[float] = []
+        
+        t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
         # ── Read four blocks ──────────────────────────────────────────────
         for block in range(4):
+            
+            # Write to configuration register:
+            # ------------------------------------------------------
+            # | 7 | 6 | 5 | 4 |   3   |     2    |   1   |   0    |
+            # |  RFU  | BLOCK | Start | VDD_MEAS | BLIND | WAKEUP 
+            # ------------------------------------------------------| 
             config = _BIT_WAKEUP | _BIT_START | (block << 4)
+            
             if measure_vdd:
                 config |= _BIT_VDD_MEAS
-
+            
+            # Write to config register 
             self._write_register(_CMD_CONFIG, config)
+            
+            # Pause 90 % of the approximate conversion time before checking
+            # if end of conversion is reached
+            time.sleep(0.9*t_fr4*1E-3)
+            
+            # Start checking for end of conversion bit
             self._wait_eoc()
 
+            # Read frame from register
             top = self._read_half(_CMD_READ_TOP)  # 129 words
             bot = self._read_half(_CMD_READ_BOT)  # 129 words
-
+            
             # Word[0] = PTAT (or VDD if VDD_MEAS set)
-            ptat_samples.append(float(top[0]))
-            ptat_samples.append(float(bot[0]))
-
             if measure_vdd:
-                vdd_sample = (float(top[0]) + float(bot[0])) / 2.0
-                self._update_stack(self._vdd_stack, vdd_sample)
+                vdd.append((float(top[0]) + float(bot[0])) / 2.0)
+            else:
+                ptat.append(float(top[0]))
+                ptat.append(float(bot[0]))
 
-            # ── Store top-half pixels (Figure 5) ─────────────────────────
-            # Top block pixels are contiguous:
-            #   word[1] = pixel (0  + block*128)
-            #   word[2] = pixel (1  + block*128)  ...
-            #   word[128] = pixel (127 + block*128)
-            for idx in range(_BLOCK_PX):
-                raw_pixels[idx + block * _BLOCK_PX] = top[idx + 1]
+            pixels[block]['top'] = top[1::]
+            pixels[block]['bot'] = bot[1::]
+            
+            # if measure_vdd:
+            #     vdd = 
+            #     self._update_stack(self._vdd_stack, vdd_sample)
 
-            # ── Store bottom-half pixels (Table 16, mirrored readout) ─────
-            # The bottom half is read in reverse row order so that the central
-            # rows of the full array are always read last.
-            # The 128 words [1..128] map to four groups of 32 pixels:
-            #   words [1 ..32]  -> pixels (992 - block*128) .. (1023 - block*128)
-            #   words [33..64]  -> pixels (960 - block*128) .. (991  - block*128)
-            #   words [65..96]  -> pixels (928 - block*128) .. (959  - block*128)
-            #   words [97..128] -> pixels (896 - block*128) .. (927  - block*128)
-            #  ...and so on for next block
-            for sub in range(4):
-                base_pix = 992 - block * _BLOCK_PX - sub * _COLS
-                for col_idx in range(_COLS):
-                    word_pos = sub * _COLS + col_idx + 1
-                    raw_pixels[base_pix + col_idx] = bot[word_pos]
+            # # ── Store top-half pixels (Figure 5) ─────────────────────────
+            # # Top block pixels are contiguous:
+            # #   word[1] = pixel (0  + block*128)
+            # #   word[2] = pixel (1  + block*128)  ...
+            # #   word[128] = pixel (127 + block*128)
+            # for idx in range(_BLOCK_PX):
+            #     pixels[idx + block * _BLOCK_PX] = top[idx + 1]
 
-        # ── Read electrical offsets (Section 12.3) ────────────────────────
-        el_offsets = self._read_electrical_offsets()
+            # # ── Store bottom-half pixels (Table 16, mirrored readout) ─────
+            # # The bottom half is read in reverse row order so that the central
+            # # rows of the full array are always read last.
+            # # The 128 words [1..128] map to four groups of 32 pixels:
+            # #   words [1 ..32]  -> pixels (992 - block*128) .. (1023 - block*128)
+            # #   words [33..64]  -> pixels (960 - block*128) .. (991  - block*128)
+            # #   words [65..96]  -> pixels (928 - block*128) .. (959  - block*128)
+            # #   words [97..128] -> pixels (896 - block*128) .. (927  - block*128)
+            # #  ...and so on for next block
+            # for sub in range(4):
+            #     base_pix = 992 - block * _BLOCK_PX - sub * _COLS
+            #     for col_idx in range(_COLS):
+            #         word_pos = sub * _COLS + col_idx + 1
+            #         pixels[base_pix + col_idx] = bot[word_pos]
 
-        # ── Update PTAT stack ─────────────────────────────────────────────
-        # Average of all 8 PTAT readings across the 4 blocks (2 per block)
-        ptat_av_this_frame = sum(ptat_samples[:8]) / min(8, len(ptat_samples))
-        self._update_stack(self._ptat_stack, ptat_av_this_frame)
-        self._update_stack(self._el_offset_stack, el_offsets)
+        # # ── Update PTAT stack ─────────────────────────────────────────────
+        # # Average of all 8 PTAT readings across the 4 blocks (2 per block)
+        # ptat_av_this_frame = sum(ptat_samples[:8]) / min(8, len(ptat_samples))
+        # self._update_stack(self._ptat_stack, ptat_av_this_frame)
+        
 
-        ptat_av = sum(self._ptat_stack) / len(self._ptat_stack)
-        vdd_av  = (sum(self._vdd_stack) / len(self._vdd_stack)
-                   if self._vdd_stack else None)
+        # ptat_av = sum(self._ptat_stack) / len(self._ptat_stack)
+        # vdd_av  = (sum(self._vdd_stack) / len(self._vdd_stack)
+        #            if self._vdd_stack else None)
 
         return {
-            "pixels":     raw_pixels,
-            "el_offsets": el_offsets,
-            "ptat_av":    ptat_av,
-            "vdd_av":     vdd_av,
+            "pixels":     pixels,
+            "ptat":       ptat,
+            "vdd":        vdd,
+            "t":          time.time()
         }
 
     def read_vdd(self) -> float:
@@ -701,7 +775,17 @@ class HTPA32x32d:
           [0..127]   top-half electrical offsets
           [128..255] bottom-half electrical offsets
         """
+        t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
+
+
+        # Write to config register 
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START | _BIT_BLIND)
+        
+        # Pause 90 % of the approximate conversion time before checking
+        # if end of conversion is reached
+        time.sleep(0.9*t_fr4*1E-3)
+        
+        # Start checking for end of conversion bit
         self._wait_eoc()
 
         top = self._read_half(_CMD_READ_TOP)  # words[1..128] = el_off[0..127]
@@ -722,6 +806,8 @@ class HTPA32x32d:
             for k in range(32):
                 bot_part[dst + k] = bot[src + k]
         el += bot_part
+
+        self._update_stack(self._el_offset_stack, el)
 
         return el  # 256 values
 
