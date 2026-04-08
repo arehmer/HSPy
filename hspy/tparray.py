@@ -508,7 +508,11 @@ class TPArray():
             self.DevConst['NROFATC'] = 0
             self.DevConst['NROFPTAT'] = 1
             self.DevConst['NROFBLOCKS'] = 50
-
+            
+            
+            warnings.warn("50x50.json is a copy of 32x32.json. Validate/correct in future!")
+            path = Path(__file__).parent / 'arraytypes' / '50x50.json'
+            self._load_calib_json(path)  
 
         else:
             raise Exception('This Thermopile Array is not known.') 
