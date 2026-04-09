@@ -339,7 +339,7 @@ class HTPA32x32d:
         
     def stop_stream(self):
         
-        
+        pass
 
     # ── Single Frame readout ─────────────────────────────────────────────────
 
