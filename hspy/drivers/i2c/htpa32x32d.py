@@ -259,11 +259,10 @@ class HTPA32x32d:
         
         F_CLK = (_F_CLK_MIN + (_F_CLK_MAX-_F_CLK_MIN) / 63 * CLK_TRIM)
         
-        t_fr4 = 32*(2**MBIT + 4) / F_CLK
+        t_fr4 = 32*(2**MBIT + 4) / (F_CLK*1E3)
         
         self._calib["F_CLK"] = F_CLK
         self._calib["t_fr4"] = t_fr4
-
 
     def sleep(self) -> None:
         """Put sensor into sleep state (~9 µA standby current)."""
