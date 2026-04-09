@@ -466,8 +466,8 @@ class HTPA32x32d:
                 top = raw_data['ptat'][block]['top']      # block data from top half
                 bot = raw_data['ptat'][block]['bot']      # block data from bottom half
                                
-                ptat_array[block] = top
-                ptat_array[-block] = bot
+                ptat_array[block] = top[0]
+                ptat_array[-block] = bot[0]
             
             if 'vdd' in raw_data.keys():
                 
