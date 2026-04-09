@@ -442,10 +442,12 @@ class HTPA32x32d:
     def convert_i2c_data(self,raw_data) -> dict :
         
         n_blocks = int(_PIXELS / 2 / _BLOCK_PX)
+        n_ptat = 2*n_blocks
+        n_vdd = 2*n_blocks
         
         pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                    # zero array for storing rearranged pixel data 
-        ptat_array = np.zeros((2*n_blocks,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
-        vdd_array = np.zeros((2*n_blocks,),dtype = np.uint16)                    # zero array for storing rearranged ptat data 
+        ptat_array = np.zeros((n_ptat,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
+        vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                    # zero array for storing rearranged ptat data 
 
         
         for block in range(4):
@@ -458,7 +460,7 @@ class HTPA32x32d:
                 for r in range(n_blocks):
                 
                     pix_array[block+r*n_blocks,:] = top[_COLS*r:_COLS*(r+1)]
-                    pix_array[-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
+                    pix_array[_ROWS-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
             
             
             if 'ptat' in raw_data.keys():
@@ -467,7 +469,7 @@ class HTPA32x32d:
                 bot = raw_data['ptat'][block]['bot']      # block data from bottom half
                                
                 ptat_array[block] = top[0]
-                ptat_array[-block] = bot[0]
+                ptat_array[n_ptat-block] = bot[0]
             
             if 'vdd' in raw_data.keys():
                 
@@ -475,7 +477,7 @@ class HTPA32x32d:
                 bot = raw_data['vdd'][block]['bot']      # block data from bottom half
                                
                 vdd_array[block] = top
-                vdd_array[-block] = bot            
+                vdd_array[n_vdd-block] = bot            
 
                 
         data = {}
