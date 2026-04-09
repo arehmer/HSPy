@@ -22,6 +22,9 @@ import struct
 import time
 from typing import List, Optional
 import smbus2
+import threading
+import queue
+import numpy as np
 # ---------------------------------------------------------------------------
 # Attempt to import smbus2; fall back to a stub so the module can be imported
 # on non-Linux hosts for testing / offline use.
@@ -124,6 +127,7 @@ _T_POLL_MS       = 1      # EOC polling interval
 _Tbuf            = 0.5    # µs,  time between STOP / START  
 _F_CLK_MIN       = 1      # MHz, min. clock frequency
 _F_CLK_MAX       = 13     # MHz, max. clock frequency
+_N_PTAT           = 8      # Number of PTATs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,6 +178,10 @@ class HTPA32x32d:
         # Calibration constants (populated by load_calibration / init)
         self._calib: dict = {}
 
+        # Threading necessities
+        self.i2c_queue = queue.Queue(maxsize=10)       # bounded to avoid memory buildup
+        self.i2c_stop = threading.Event()              # if event is set, threads are killed
+        
         # Rolling stack buffers (depth 8) for stable averaging
         self._ptat_stack: List[float] = []
         self._vdd_stack:  List[float] = []
@@ -273,6 +281,33 @@ class HTPA32x32d:
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP)
         time.sleep(_T_WAKEUP_US * 1e-6)
 
+
+    
+    def read_thread(self):
+        """
+        Threadable function for i2c readouts 
+        """
+        
+        while not self.i2c_stop.is_set():
+            
+            data_dict = self.read_frame()                         # read pixels, ptat, vdd
+            data_dict.update(self.read_electrical_offsets())      # read electrical offsets
+            
+            self.i2c_queue.put(data_dict)                         # put in queue, blocks if full (backpressure)
+            
+    def convert_thread(self):
+        """
+        Threadable function for converting raw i2c data into the appropriate 
+        format (sorting, rearranging, conversion)
+        """
+        
+        while not self.i2c_stop.is_set():
+            try:
+                data_dict = self.i2c_queue.get(timeout=0.1)             # blocks until data arrives, or times out
+                self.convert_i2c_data(data_dict)                        # convert raw i2c data in place
+            except self.i2c_queue.Empty:
+                continue                                          # no data yet, loop and check stop_event
+    
     # ── Continuous frame readout  ────────────────────────────────────────────
     def read_stream(self):
         """
@@ -294,7 +329,7 @@ class HTPA32x32d:
         read_frame
         
         # ── Read electrical offsets (Section 12.3) ────────────────────────
-        el_offsets = self._read_electrical_offsets()
+        el_offsets = self.read_electrical_offsets()
         
         
         
@@ -328,8 +363,13 @@ class HTPA32x32d:
             {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
              for b in range(4)}
                                         
-        ptat: List[float] = []
-        vdd: List[float] = []
+        ptat: dict[int, dict[str, list[int]]] = \
+            {b: {'top': [0] , 'bot': [0] } \
+             for b in range(4)}
+
+        vdd: dict[int, dict[str, list[int]]] = \
+         {b: {'top': [0] , 'bot': [0] } \
+          for b in range(4)}
         
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
@@ -362,41 +402,16 @@ class HTPA32x32d:
             
             # Word[0] = PTAT (or VDD if VDD_MEAS set)
             if measure_vdd:
-                vdd.append((float(top[0]) + float(bot[0])) / 2.0)
+                vdd[block]['top'] = [top[0]]
+                vdd[block]['bot'] = [bot[0]]
             else:
-                ptat.append(float(top[0]))
-                ptat.append(float(bot[0]))
-
+                ptat[block]['top'] = [top[0]]
+                ptat[block]['bot'] = [bot[0]]
+            
             pixels[block]['top'] = top[1::]
             pixels[block]['bot'] = bot[1::]
             
-            # if measure_vdd:
-            #     vdd = 
-            #     self._update_stack(self._vdd_stack, vdd_sample)
-
-            # # ── Store top-half pixels (Figure 5) ─────────────────────────
-            # # Top block pixels are contiguous:
-            # #   word[1] = pixel (0  + block*128)
-            # #   word[2] = pixel (1  + block*128)  ...
-            # #   word[128] = pixel (127 + block*128)
-            # for idx in range(_BLOCK_PX):
-            #     pixels[idx + block * _BLOCK_PX] = top[idx + 1]
-
-            # # ── Store bottom-half pixels (Table 16, mirrored readout) ─────
-            # # The bottom half is read in reverse row order so that the central
-            # # rows of the full array are always read last.
-            # # The 128 words [1..128] map to four groups of 32 pixels:
-            # #   words [1 ..32]  -> pixels (992 - block*128) .. (1023 - block*128)
-            # #   words [33..64]  -> pixels (960 - block*128) .. (991  - block*128)
-            # #   words [65..96]  -> pixels (928 - block*128) .. (959  - block*128)
-            # #   words [97..128] -> pixels (896 - block*128) .. (927  - block*128)
-            # #  ...and so on for next block
-            # for sub in range(4):
-            #     base_pix = 992 - block * _BLOCK_PX - sub * _COLS
-            #     for col_idx in range(_COLS):
-            #         word_pos = sub * _COLS + col_idx + 1
-            #         pixels[base_pix + col_idx] = bot[word_pos]
-
+            
         # # ── Update PTAT stack ─────────────────────────────────────────────
         # # Average of all 8 PTAT readings across the 4 blocks (2 per block)
         # ptat_av_this_frame = sum(ptat_samples[:8]) / min(8, len(ptat_samples))
@@ -407,26 +422,89 @@ class HTPA32x32d:
         # vdd_av  = (sum(self._vdd_stack) / len(self._vdd_stack)
         #            if self._vdd_stack else None)
 
-        return {
-            "pixels":     pixels,
-            "ptat":       ptat,
-            "vdd":        vdd,
-            "t":          time.time()
-        }
 
-    def read_vdd(self) -> float:
-        """
-        Trigger a dedicated VDD measurement for supply-voltage compensation.
-        Returns the averaged VDD digit value and updates the internal stack.
-        """
-        config = _BIT_WAKEUP | _BIT_START | _BIT_VDD_MEAS
-        self._write_register(_CMD_CONFIG, config)
-        self._wait_eoc()
-        top = self._read_half(_CMD_READ_TOP)
-        bot = self._read_half(_CMD_READ_BOT)
-        vdd_av = (float(top[0]) + float(bot[0])) / 2.0
-        self._update_stack(self._vdd_stack, vdd_av)
-        return vdd_av
+            
+        if measure_vdd:
+            return {
+                "pixels":     pixels,
+                "vdd":        vdd,
+                "t":          time.time()
+            }
+        else:
+            return {
+                "pixels":     pixels,
+                "ptat":       ptat,
+                "t":          time.time()
+            }
+        
+
+    
+    def convert_i2c_data(self,raw_data) -> dict :
+        
+        n_blocks = _PIXELS / 2 / _BLOCK_PX
+        
+        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                    # zero array for storing rearranged pixel data 
+        ptat_array = np.zeros((2*n_blocks,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
+        vdd_array = np.zeros((2*n_blocks,),dtype = np.uint16)                    # zero array for storing rearranged ptat data 
+
+        
+        for block in range(4):
+        
+            if 'pixels' in raw_data.keys():
+                
+                top = raw_data['pixels'][block]['top']      # block data from top half
+                bot = raw_data['pixels'][block]['bot']      # block data from bottom half
+                
+                for r in range(n_blocks):
+                
+                    pix_array[block+r*n_blocks,:] = top[_COLS*r:_COLS*(r+1)]
+                    pix_array[-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
+            
+            
+            if 'ptat' in raw_data.keys():
+                
+                top = raw_data['ptat'][block]['top']      # block data from top half
+                bot = raw_data['ptat'][block]['bot']      # block data from bottom half
+                               
+                ptat_array[block] = top
+                ptat_array[-block] = bot
+            
+            if 'vdd' in raw_data.keys():
+                
+                top = raw_data['vdd'][block]['top']      # block data from top half
+                bot = raw_data['vdd'][block]['bot']      # block data from bottom half
+                               
+                vdd_array[block] = top
+                vdd_array[-block] = bot            
+
+                
+        data = {}
+        
+        if 'pixels' in raw_data.keys():
+            data['pixels'] = pix_array.flatten()
+
+        if 'ptat' in raw_data.keys():
+            data['ptat'] = ptat_array.flatten()
+
+        if 'vdd' in raw_data.keys():
+            data['vdd'] = vdd_array.flatten()            
+            
+        return data
+        
+
+    # def read_vdd(self) -> float:
+    #     """
+    #     Trigger a dedicated VDD measurement for supply-voltage compensation.
+    #     Returns the averaged VDD digit value and updates the internal stack.
+    #     """
+    #     config = _BIT_WAKEUP | _BIT_START | _BIT_VDD_MEAS
+    #     self._write_register(_CMD_CONFIG, config)
+    #     self._wait_eoc()
+    #     top = self._read_half(_CMD_READ_TOP)
+    #     bot = self._read_half(_CMD_READ_BOT)
+    #     vdd_av = (float(top[0]) + float(bot[0])) / 2.0
+    #     self._update_stack(self._vdd_stack, vdd_av)
+    #     return vdd_av
 
     # ── Temperature calculation ───────────────────────────────────────────────
 
@@ -781,7 +859,7 @@ class HTPA32x32d:
 
     # ── Private: electrical offsets ───────────────────────────────────────────
 
-    def _read_electrical_offsets(self) -> List[int]:
+    def read_electrical_offsets(self) -> List[int]:
         """
         Trigger a BLIND conversion and read all 256 electrical offset values.
 
@@ -805,25 +883,27 @@ class HTPA32x32d:
         top = self._read_half(_CMD_READ_TOP)  # words[1..128] = el_off[0..127]
         bot = self._read_half(_CMD_READ_BOT)  # words mirrored as per Table 18
 
-        # Top half: direct mapping (Table 17)
-        el = list(top[1:129])
+        return {'top': top, 'bot': bot}
 
-        # Bottom half: mirrored readout order (Table 18)
-        # words[1..32]   -> el_offset[224..255]
-        # words[33..64]  -> el_offset[192..223]
-        # words[65..96]  -> el_offset[160..191]
-        # words[97..128] -> el_offset[128..159]
-        bot_part = [0] * 128
-        for sub in range(4):
-            src = sub * 32 + 1
-            dst = (3 - sub) * 32          # destination within bot_part
-            for k in range(32):
-                bot_part[dst + k] = bot[src + k]
-        el += bot_part
+        # # Top half: direct mapping (Table 17)
+        # el = list(top[1:129])
+        
+        # # Bottom half: mirrored readout order (Table 18)
+        # # words[1..32]   -> el_offset[224..255]
+        # # words[33..64]  -> el_offset[192..223]
+        # # words[65..96]  -> el_offset[160..191]
+        # # words[97..128] -> el_offset[128..159]
+        # bot_part = [0] * 128
+        # for sub in range(4):
+        #     src = sub * 32 + 1
+        #     dst = (3 - sub) * 32          # destination within bot_part
+        #     for k in range(32):
+        #         bot_part[dst + k] = bot[src + k]
+        # el += bot_part
 
-        self._update_stack(self._el_offset_stack, el)
+        # # self._update_stack(self._el_offset_stack, el)
 
-        return el  # 256 values
+        # return el  # 256 values
 
     # ── Private: sensitivity coefficients ────────────────────────────────────
 
