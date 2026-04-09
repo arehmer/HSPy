@@ -301,15 +301,19 @@ class HTPA32x32d:
         format (sorting, rearranging, conversion)
         """
         
+        timeout = self._calib['t_fr4'] * 4 * 1.1                        # timeout is frame conversion time + 10 %
+        
         while not self.i2c_stop.is_set():
             try:
-                data_dict = self.i2c_queue.get(timeout=0.1)             # blocks until data arrives, or times out
-                self.convert_i2c_data(data_dict)                        # convert raw i2c data in place
+                raw_data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
+                proc_data = self.convert_i2c_data(raw_data)            # convert raw i2c data in place
+                
+                print(proc_data['pixels'][0:5])
             except self.i2c_queue.Empty:
                 continue                                          # no data yet, loop and check stop_event
     
     # ── Continuous frame readout  ────────────────────────────────────────────
-    def read_stream(self):
+    def start_stream(self):
         """
         Acquire complete frames in a loop
 
@@ -319,18 +323,21 @@ class HTPA32x32d:
 
         """
         
-        k = 0                                       # frame counter
-        t_fr4 = self._calib["t_fr4"]                # ms, block conversion time
         
-        while True:
-            
-            htpa_data = self.read_frame()
+        t_reader    = threading.Thread(target=self.read_thread)
+        t_conv      = threading.Thread(target=self.convert_thread)
         
-        read_frame
+        t_reader.start()
+        t_conv.start()
+
+        time.sleep(5)
         
-        # ── Read electrical offsets (Section 12.3) ────────────────────────
-        el_offsets = self.read_electrical_offsets()
         
+        t_reader.join()
+        t_conv.join()
+
+        
+    def stop_stream(self):
         
         
 
@@ -436,8 +443,6 @@ class HTPA32x32d:
                 "ptat":       ptat,
                 "t":          time.time()
             }
-        
-
     
     def convert_i2c_data(self,raw_data) -> dict :
         
@@ -462,7 +467,6 @@ class HTPA32x32d:
                     pix_array[block+r*n_blocks,:] = top[_COLS*r:_COLS*(r+1)]
                     pix_array[_ROWS-1-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
             
-            
             if 'ptat' in raw_data.keys():
                 
                 top = raw_data['ptat'][block]['top']      # block data from top half
@@ -479,7 +483,6 @@ class HTPA32x32d:
                 vdd_array[block] = top
                 vdd_array[n_vdd-1-block] = bot            
 
-                
         data = {}
         
         if 'pixels' in raw_data.keys():
