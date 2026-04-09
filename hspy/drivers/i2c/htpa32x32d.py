@@ -460,7 +460,7 @@ class HTPA32x32d:
                 for r in range(n_blocks):
                 
                     pix_array[block+r*n_blocks,:] = top[_COLS*r:_COLS*(r+1)]
-                    pix_array[_ROWS-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
+                    pix_array[_ROWS-1-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
             
             
             if 'ptat' in raw_data.keys():
@@ -469,7 +469,7 @@ class HTPA32x32d:
                 bot = raw_data['ptat'][block]['bot']      # block data from bottom half
                                
                 ptat_array[block] = top[0]
-                ptat_array[n_ptat-block] = bot[0]
+                ptat_array[n_ptat-1-block] = bot[0]
             
             if 'vdd' in raw_data.keys():
                 
@@ -477,7 +477,7 @@ class HTPA32x32d:
                 bot = raw_data['vdd'][block]['bot']      # block data from bottom half
                                
                 vdd_array[block] = top
-                vdd_array[n_vdd-block] = bot            
+                vdd_array[n_vdd-1-block] = bot            
 
                 
         data = {}
