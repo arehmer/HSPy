@@ -441,7 +441,7 @@ class HTPA32x32d:
     
     def convert_i2c_data(self,raw_data) -> dict :
         
-        n_blocks = _PIXELS / 2 / _BLOCK_PX
+        n_blocks = int(_PIXELS / 2 / _BLOCK_PX)
         
         pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                    # zero array for storing rearranged pixel data 
         ptat_array = np.zeros((2*n_blocks,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
