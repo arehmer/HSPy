@@ -735,7 +735,7 @@ class HTPA32x32d:
                                      np.flip(c["thgrad"][_HALF::])])
         c["thoffset_arr"] =  np.hstack([c["thoffset"][0:_HALF],
                                        np.flip(c["thoffset"][_HALF::])])
-        c["pij_arr"] =  np.hstack([c["pij"][0:_HALF],
+        c[""] =  np.hstack([c["pij"][0:_HALF],
                                   np.flip(c["pij"][_HALF::])])
 
         # VDD compensation arrays (256 entries each)
@@ -743,8 +743,8 @@ class HTPA32x32d:
         c["vddcompoff"]    = i16_arr(_EEP_VDDCOMPOFF,  256)
         
         # Reshape VDD calibration data to array of same dimension as pixels
-        # c["vddcompgrad_arr"] = self._blocks_to_array(c["vddcompgrad"])
-        # c["vddcompoff_arr"] = self._blocks_to_array(c["vddcompoff"])
+        c["vddcompgrad_arr"] = self._blocks_to_array(c["vddcompgrad"])
+        c["vddcompoff_arr"] = self._blocks_to_array(c["vddcompoff"])
         
 
         self._calib = c
