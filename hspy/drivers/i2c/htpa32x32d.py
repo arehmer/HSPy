@@ -731,12 +731,12 @@ class HTPA32x32d:
         c["pij"]           = u16_arr(_EEP_PIJ,      _PIXELS)
         
         # Rearrange per-pixel arrays to correspond to actual pixel order
-        c["thgrad_arr"] =  np.hstack(c["thgrad"][0:_HALF],
-                                     np.flip(c["thgrad"][_HALF::]))
-        c["thoffset_arr"] =  np.hstack(c["thoffset"][0:_HALF],
-                                       np.flip(c["thoffset"][_HALF::]))
-        c["pij_arr"] =  np.hstack(c["pij"][0:_HALF],
-                                  np.flip(c["pij"][_HALF::]))
+        c["thgrad_arr"] =  np.hstack([c["thgrad"][0:_HALF],
+                                     np.flip(c["thgrad"][_HALF::])])
+        c["thoffset_arr"] =  np.hstack([c["thoffset"][0:_HALF],
+                                       np.flip(c["thoffset"][_HALF::])])
+        c["pij_arr"] =  np.hstack([c["pij"][0:_HALF],
+                                  np.flip(c["pij"][_HALF::])])
 
         # VDD compensation arrays (256 entries each)
         c["vddcompgrad"]   = i16_arr(_EEP_VDDCOMPGRAD, 256)
