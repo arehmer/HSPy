@@ -767,7 +767,7 @@ class HTPA32x32d:
         top = np.tile(top,(_BLOCKS_,))
         bot = np.tile(bot,(_BLOCKS_,))
         
-        array = np.vstack(top,bot)
+        array = np.vstack([top,bot])
         
         return array
         
