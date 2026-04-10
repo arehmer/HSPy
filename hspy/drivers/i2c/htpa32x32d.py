@@ -743,8 +743,8 @@ class HTPA32x32d:
         c["vddcompoff"]    = i16_arr(_EEP_VDDCOMPOFF,  256)
         
         # Reshape VDD calibration data to array of same dimension as pixels
-        c["vddcompgrad_arr"] = self._blocks_to_array(c["vddcompgrad"])
-        c["vddcompoff_arr"] = self._blocks_to_array(c["vddcompoff"])
+        # c["vddcompgrad_arr"] = self._blocks_to_array(c["vddcompgrad"])
+        # c["vddcompoff_arr"] = self._blocks_to_array(c["vddcompoff"])
         
 
         self._calib = c
