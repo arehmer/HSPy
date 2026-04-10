@@ -118,6 +118,7 @@ _COLS      = 32
 _PIXELS    = _ROWS * _COLS     # 1024
 _HALF      = _PIXELS // 2      # 512
 _BLOCK_PX  = 128               # pixels per block per half
+_BLOCKS_ = 4
 
 # ── Miscellaneous constants ───────────────────────────────────────────────────
 _PCSCALEVAL      = 1e8    # Section 12.5
@@ -332,6 +333,7 @@ class HTPA32x32d:
 
         time.sleep(5)
         
+        self.i2c_stop.set()
         
         t_reader.join()
         t_conv.join()
@@ -466,6 +468,13 @@ class HTPA32x32d:
                 
                     pix_array[block+r*n_blocks,:] = top[_COLS*r:_COLS*(r+1)]
                     pix_array[_ROWS-1-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
+                    
+            if 'eloff' in raw_data.keys():
+                
+                top = raw_data['eloff'][block]['top']      # block data from top half
+                bot = raw_data['eloff'][block]['bot']      # block data from bottom half
+                
+                warnings.warn('Rearrange / Convert electrical offsets here')
             
             if 'ptat' in raw_data.keys():
                 
@@ -512,11 +521,31 @@ class HTPA32x32d:
     #     return vdd_av
 
     # ── Temperature calculation ───────────────────────────────────────────────
-
-    def calculate_temperatures(self, frame: dict) -> List[float]:
+    def calculate_Tamb(self,data:dict) -> dict:
         """
-        Convert a raw frame (from read_frame()) into per-pixel object
-        temperatures in degrees Celsius.
+        Calculates ambient temperature Tamb, if necessary calibration data 
+        is available
+
+        Parameters
+        ----------
+        data : dict
+            DESCRIPTION.
+
+        Returns
+        -------
+        dict
+            DESCRIPTION.
+
+        """
+        
+        
+        
+    
+
+    def apply_calib(self, data: dict) -> List[float]:
+        """
+        Convert a raw frame (from read_frame()) into per-pixel compensated
+        voltages in digits. Also computes ambient temperature as a side-effect.
 
         Processing pipeline (Sections 12.1 - 12.5):
           1. Ambient temperature from PTAT
@@ -524,8 +553,7 @@ class HTPA32x32d:
           3. Electrical offset compensation per pixel
           4. VDD (supply voltage) compensation per pixel  [if VDD available]
           5. Sensitivity (PixC) compensation
-          6. Object temperature via LUT bilinear interpolation
-          7. Dead-pixel masking
+          6. Dead-pixel masking
 
         Returns list[1024] of temperatures in °C.
         """
@@ -534,84 +562,78 @@ class HTPA32x32d:
                 "Calibration not loaded. Call init() or load_calibration() first."
             )
 
-        c       = self._calib
-        raw     = frame["pixels"]
-        ptat_av = frame["ptat_av"]
-        vdd_av  = frame.get("vdd_av") or (
-            float(sum(self._vdd_stack) / len(self._vdd_stack))
-            if self._vdd_stack else None
-        )
+        
+        c       = self._calib           # Calibration data dictionary
 
-        # Use stored electrical offset stack if frame value unavailable
-        if frame["el_offsets"]:
-            el_off = frame["el_offsets"]
-        elif self._el_offset_stack:
-            el_off = self._el_offset_stack[-1]
-        else:
-            el_off = [0] * 256
-
-        # ── Pre-compute per-pixel sensitivity coefficients ────────────────
-        pix_c = self._calc_pixc(c)
-
-        results: List[float] = []
-
-        for pix_num in range(_PIXELS):
-            row    = pix_num // _COLS
-            col    = pix_num  % _COLS
-            is_top = (row < _ROWS // 2)
-
-            v = float(raw[pix_num])
-
-            # ── Step 1: Thermal offset compensation (Section 12.2) ────────
-            th_grad = c["thgrad"][pix_num]
-            th_off  = c["thoffset"][pix_num]
-            v_comp  = v - (th_grad * ptat_av / (2 ** c["gradscale"])) - th_off
-
-            # ── Step 2: Electrical offset compensation (Section 12.3) ─────
-            # Top half index: (col + row*32) % 128
-            # Bottom half index: (col + row*32) % 128 + 128
-            if is_top:
-                el_idx = (col + row * _COLS) % _BLOCK_PX
-            else:
-                el_idx = (col + row * _COLS) % _BLOCK_PX + _BLOCK_PX
-            v_comp -= el_off[el_idx]
-
-            # ── Step 3: VDD compensation (Section 12.4) ───────────────────
-            if vdd_av is not None:
-                if is_top:
-                    idx256 = (col + row * _COLS) % _BLOCK_PX
-                else:
-                    idx256 = (col + row * _COLS) % _BLOCK_PX + _BLOCK_PX
-
-                vdd_cg = c["vddcompgrad"][idx256]
-                vdd_co = c["vddcompoff"][idx256]
-
-                vdd_num   = (vdd_cg * ptat_av / (2 ** c["vddscgrad"])) + vdd_co
-                vdd_denom = 2 ** c["vddscoff"]
-
-                ptat_th1 = c["ptat_th1"]
-                ptat_th2 = c["ptat_th2"]
-                vddth1   = c["vddth1"]
-                vddth2   = c["vddth2"]
-
-                ptat_slope  = (vddth2 - vddth1) / (ptat_th2 - ptat_th1)
-                vdd_factor  = vdd_av - vddth1 - ptat_slope * (ptat_av - ptat_th1)
-                v_comp     -= (vdd_num / vdd_denom) * vdd_factor
-
-            # ── Step 4: Sensitivity (PixC) compensation (Section 12.5) ───
-            pc = pix_c[pix_num] if pix_c[pix_num] != 0 else _PCSCALEVAL
-            v_pixc = v_comp * _PCSCALEVAL / pc
-
-            # ── Step 5: Object temperature via LUT ────────────────────────
-            ta_dk   = ptat_av * c["ptat_gradient"] + c["ptat_offset"]
-            t_dk    = self._lut_interpolate(v_pixc, ta_dk, c)
-            t_dk   += c["global_off"]                      # GlobalOff trim
-            results.append((t_dk - 2732.0) / 10.0)        # dK -> °C
+        # ------------- 12.1 Ambient Temperature ------------------------------
+        PTAT_grad = c["ptat_gradient"]
+        PTAT_off  = c["ptat_offset"]
+        
+        PTAT_avg = data['ptat'].mean()
+        Tamb = PTAT_avg * PTAT_grad + PTAT_off
+        
+        data['ptat_avg'] = PTAT_avg
+        data['Tamb'] = Tamb
+        
+        
+        # ------------- 12.2 Thermal Offset -----------------------------------
+        Th_grad = c["thgrad"]
+        Th_off  = c["thoffset"]        
+        gradScale = c["gradscale"]
+      
+        V_ThComp = + (Th_grad * PTAT_avg) / 2**(gradScale) + Th_off
+        
+        V_comp = data['pixels'] - V_ThComp
+      
+        # ------------- 12.3 Electrical Offset --------------------------------
+        V_ElComp = data['eloff']
+        
+        V_comp = V_comp - V_ElComp
+        
+        # ------------- 12.4 Vdd Compensation- --------------------------------
+        VddCompGrad = c["vddcompgrad_arr"]
+        VddCompOff  = c["vddcompoff_arr"]
+        VddScGrad   = c["vddscgrad"]
+        VddScOff    = c["vddscoff"]
+        
+        VddTh1      = c["vddth1"]
+        VddTh2      = c["vddth2"] 
+        PTAT_Th1    = c["ptat_th1"]
+        PTAT_Th2    = c["ptat_th2"]
+               
+        
+        VDD_avg = data['vdd'].mean()
+        
+        
+        V_VddComp = ((VddCompGrad * PTAT_avg)/(2**VddScGrad) + VddCompOff) / \
+            (2**VddScOff) * \
+                (VDD_avg - VddTh1 - ((VddTh2-VddTh1)/(PTAT_Th2-PTAT_Th1)) * \
+                 (PTAT_avg-PTAT_Th1))
+         
+        V_comp = V_comp - V_VddComp
+        
+        # ------------- 12.5 Object Temperature -------------------------------
+        Pij         = c["pij_arr"]
+        PixC_max    = c["pixcmax"]
+        PixC_min    = c["pixcmin"]
+        eps         = c["epsilon"]
+        GlobalGain  = c["global_gain"]
+        
+        PCSCELEVAL = 1E8
+        
+        PixCij = (Pij * (PixC_max-PixC_min) / 65535 +  PixC_min) * \
+            eps/100 * GlobalGain/10000
+        
+            
+        V_comp = V_comp * PCSCELEVAL / PixCij
+            
+        data['pixels_comp'] = V_comp
+        
 
         # ── Step 6: Replace dead pixels with neighbour average ────────────
-        self._apply_pixel_masking(results, c)
+        # self._apply_pixel_masking(results, c)
 
-        return results
+        return data
 
     def get_ambient_temperature(self, frame: dict) -> float:
         """
@@ -659,6 +681,7 @@ class HTPA32x32d:
         def unpack_refcal(mbit_raw:int) -> int:
             refcal = (mbit_raw & _BITMASK_REFCAL) >> 4
             return refcal
+        
         # Scalar values
         c["pixcmin"]       = f32(_EEP_PIXCMIN)
         c["pixcmax"]       = f32(_EEP_PIXCMAX)
@@ -706,15 +729,48 @@ class HTPA32x32d:
         c["thgrad"]        = i16_arr(_EEP_THGRAD,   _PIXELS)
         c["thoffset"]      = i16_arr(_EEP_THOFFSET, _PIXELS)
         c["pij"]           = u16_arr(_EEP_PIJ,      _PIXELS)
+        
+        # Rearrange per-pixel arrays to correspond to actual pixel order
+        c["thgrad_arr"] =  np.hstack(c["thgrad"][0:_PIXELS/2],
+                                     np.flip(c["thgrad"][_PIXELS/2::]))
+        c["thoffset_arr"] =  np.hstack(c["thoffset"][0:_PIXELS/2],
+                                       np.flip(c["thoffset"][_PIXELS/2::]))
+        c["pij_arr"] =  np.hstack(c["pij"][0:_PIXELS/2],
+                                  np.flip(c["pij"][_PIXELS/2::]))
 
         # VDD compensation arrays (256 entries each)
         c["vddcompgrad"]   = i16_arr(_EEP_VDDCOMPGRAD, 256)
         c["vddcompoff"]    = i16_arr(_EEP_VDDCOMPOFF,  256)
+        
+        # Reshape VDD calibration data to array of same dimension as pixels
+        c["vddcompgrad_arr"] = self._blocks_to_array(c["vddcompgrad"])
+        c["vddcompoff_arr"] = self._blocks_to_array(c["vddcompoff"])
+        
 
         self._calib = c
         
-        print('Calibration constants read from EEPROM:')
-        print(c)
+    def _blocks_to_array(self,block_data:list) -> np.ndarray:
+        
+        # Check input size 
+        expected_len = _PIXELS / _BLOCKS_
+        
+        if not len(block_data) == expected_len:
+            raise ValueError(f'Length of block_data is { len(block_data)}, ', 
+                             'expected was {expected_len}.')
+        
+        top = block_data[0::_COLS*_BLOCKS_]
+        bot = block_data[_COLS*_BLOCKS_::]      
+        
+        top = np.array(top).reshape((_BLOCKS_,_COLS))
+        bot = np.array(bot).reshape((_BLOCKS_,_COLS))
+        
+        top = np.tile(top,(_BLOCKS_,))
+        bot = np.tile(bot,(_BLOCKS_,))
+        
+        array = np.vstack(top,bot)
+        
+        return array
+        
 
     def load_lut(
         self,
@@ -888,7 +944,7 @@ class HTPA32x32d:
         top = self._read_half(_CMD_READ_TOP)  # words[1..128] = el_off[0..127]
         bot = self._read_half(_CMD_READ_BOT)  # words mirrored as per Table 18
 
-        return {'top': top, 'bot': bot}
+        return {'eloff':{'top': top, 'bot': bot}}
 
         # # Top half: direct mapping (Table 17)
         # el = list(top[1:129])
