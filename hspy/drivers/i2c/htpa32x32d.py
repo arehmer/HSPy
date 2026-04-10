@@ -116,7 +116,7 @@ _EEP_PIJ                = 0x1740   # 1024 x uint16 LE sensitivity coefficient
 _ROWS      = 32
 _COLS      = 32
 _PIXELS    = _ROWS * _COLS     # 1024
-_HALF      = _PIXELS // 2      # 512
+_HALF      = int(_PIXELS // 2) # 512
 _BLOCK_PX  = 128               # pixels per block per half
 _BLOCKS_ = 4
 
@@ -731,12 +731,12 @@ class HTPA32x32d:
         c["pij"]           = u16_arr(_EEP_PIJ,      _PIXELS)
         
         # Rearrange per-pixel arrays to correspond to actual pixel order
-        c["thgrad_arr"] =  np.hstack(c["thgrad"][0:_PIXELS/2],
-                                     np.flip(c["thgrad"][_PIXELS/2::]))
-        c["thoffset_arr"] =  np.hstack(c["thoffset"][0:_PIXELS/2],
-                                       np.flip(c["thoffset"][_PIXELS/2::]))
-        c["pij_arr"] =  np.hstack(c["pij"][0:_PIXELS/2],
-                                  np.flip(c["pij"][_PIXELS/2::]))
+        c["thgrad_arr"] =  np.hstack(c["thgrad"][0:_HALF],
+                                     np.flip(c["thgrad"][_HALF::]))
+        c["thoffset_arr"] =  np.hstack(c["thoffset"][0:_HALF],
+                                       np.flip(c["thoffset"][_HALF::]))
+        c["pij_arr"] =  np.hstack(c["pij"][0:_HALF],
+                                  np.flip(c["pij"][_HALF::]))
 
         # VDD compensation arrays (256 entries each)
         c["vddcompgrad"]   = i16_arr(_EEP_VDDCOMPGRAD, 256)
