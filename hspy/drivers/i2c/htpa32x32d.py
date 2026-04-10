@@ -758,7 +758,7 @@ class HTPA32x32d:
             raise ValueError(f'Length of block_data is { len(block_data)}, ', 
                              'expected was {expected_len}.')
         
-        top = block_data[0::_COLS*_BLOCKS_]
+        top = block_data[0:_COLS*_BLOCKS_]
         bot = block_data[_COLS*_BLOCKS_::]      
         
         top = np.array(top).reshape((_BLOCKS_,_COLS))
