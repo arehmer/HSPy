@@ -289,12 +289,17 @@ class HTPA32x32d:
         Threadable function for i2c readouts 
         """
         
+        meas_vdd = True
+        
         while not self.i2c_stop.is_set():
             
-            data_dict = self.read_frame()                         # read pixels, ptat, vdd
+            data_dict = self.read_frame(meas_vdd)                 # read pixels, ptat, vdd
             data_dict.update(self.read_electrical_offsets())      # read electrical offsets
             
             self.i2c_queue.put(data_dict)                         # put in queue, blocks if full (backpressure)
+            
+            # Flip meas_vdd flag
+            meas_vdd = meas_vdd ^ 1
             
     def convert_thread(self):
         """
@@ -452,9 +457,9 @@ class HTPA32x32d:
         n_ptat = 2*n_blocks
         n_vdd = 2*n_blocks
         
-        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                    # zero array for storing rearranged pixel data 
+        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                # zero array for storing rearranged pixel data 
         ptat_array = np.zeros((n_ptat,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
-        vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                    # zero array for storing rearranged ptat data 
+        vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                     # zero array for storing rearranged ptat data 
 
         
         for block in range(4):
@@ -468,14 +473,7 @@ class HTPA32x32d:
                 
                     pix_array[block+r*n_blocks,:] = top[_COLS*r:_COLS*(r+1)]
                     pix_array[_ROWS-1-block-r*n_blocks,:] = bot[_COLS*r:_COLS*(r+1)]
-                    
-            if 'eloff' in raw_data.keys():
-                
-                top = raw_data['eloff'][block]['top']      # block data from top half
-                bot = raw_data['eloff'][block]['bot']      # block data from bottom half
-                
-                warnings.warn('Rearrange / Convert electrical offsets here')
-            
+                                
             if 'ptat' in raw_data.keys():
                 
                 top = raw_data['ptat'][block]['top']      # block data from top half
@@ -490,19 +488,32 @@ class HTPA32x32d:
                 bot = raw_data['vdd'][block]['bot']      # block data from bottom half
                                
                 vdd_array[block] = top
-                vdd_array[n_vdd-1-block] = bot            
-
+                vdd_array[n_vdd-1-block] = bot      
+                
+                
+        if 'eloff' in raw_data.keys():
+            
+            top = raw_data['eloff']['top']      # block data from top half
+            bot = raw_data['eloff']['bot']      # block data from bottom half
+            
+            topbot = top + bot
+            
+            eloff_array = self._blocks_to_array(topbot)
+            
         data = {}
         
         if 'pixels' in raw_data.keys():
             data['pixels'] = pix_array.flatten()
+            
+        if 'eloff' in raw_data.keys():
+            data['eloff'] = eloff_array.flatten()
 
         if 'ptat' in raw_data.keys():
             data['ptat'] = ptat_array.flatten()
 
         if 'vdd' in raw_data.keys():
             data['vdd'] = vdd_array.flatten()            
-            
+        
         return data
         
 
@@ -520,7 +531,7 @@ class HTPA32x32d:
     #     self._update_stack(self._vdd_stack, vdd_av)
     #     return vdd_av
 
-    # ── Temperature calculation ───────────────────────────────────────────────
+    # ── Temperature calculation ──────────────────────────────────────────────
     def calculate_Tamb(self,data:dict) -> dict:
         """
         Calculates ambient temperature Tamb, if necessary calibration data 
