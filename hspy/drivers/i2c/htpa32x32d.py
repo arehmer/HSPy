@@ -423,7 +423,7 @@ class HTPA32x32d:
             vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
         else:
             ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
-            ptat['bot'] = [int(np.round(ptat (vdd['top']) / len (ptat['top'])))]
+            ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
         
         # ------ Return -------------------------------------------------------
         if measure_vdd:
