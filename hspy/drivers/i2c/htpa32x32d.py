@@ -373,13 +373,9 @@ class HTPA32x32d:
             {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
              for b in range(4)}
                                         
-        ptat: dict[str, list[int]] = \
-            {b: {'top': [] , 'bot': [] } \
-             for b in range(4)}
+        ptat: dict[str, list[int]] =  {'top': [] , 'bot': [] }
 
-        vdd: dict[str, list[int]] = \
-         {b: {'top': [] , 'bot': [] } \
-          for b in range(4)}
+        vdd: dict[str, list[int]] =  {'top': [] , 'bot': [] }
         
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
