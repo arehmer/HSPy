@@ -767,7 +767,7 @@ class HTPA32x32d:
         
         if not len(block_data) == expected_len:
             raise ValueError(f'Length of block_data is { len(block_data)}, ', 
-                             'expected was {expected_len}.')
+                             f'expected was {expected_len}.')
         
         top = block_data[0:_COLS*_BLOCKS_]
         bot = block_data[_COLS*_BLOCKS_::]      
