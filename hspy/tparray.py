@@ -1241,10 +1241,16 @@ class TPArray():
     
     def _calc_Tamb0_4(self,df_meas:pd.Series):
         
-        ''' Sensitivity compensation '''
+        ptat_av = df_meas[self._PTAT].mean()
         
-        raise NotImplementedError('Vdd compensation not implemented '
-                                  'for this htpa device')
+        ptat_grad = self.BCC['ptatGrad']s
+        ptat_off = self.BCC['ptatOffset']
+        
+        Tamb0 = ptat_av*ptat_grad+ptat_off
+        
+        dtype = df_meas.loc[self._T_amb].dtypes
+        df_meas.loc[self._T_amb] = Tamb0.astype(dtype)
+        
     
     def frame_to_blocks(self,frame:np.ndarray,**kwargs)->dict:
         """
