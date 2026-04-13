@@ -419,11 +419,11 @@ class HTPA32x32d:
             
         # ------ Average PTAT / VDD -------------------------------------------
         if measure_vdd:
-            vdd['top'] = sum (vdd['top']) / len (vdd['top'])
-            vdd['bot'] = sum (vdd['bot']) / len (vdd['bot'])
+            vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
+            vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
         else:
-            ptat['top'] = sum (ptat['top']) / len (ptat['top'])
-            ptat['bot'] = sum (ptat['bot']) / len (ptat['bot'])
+            ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
+            ptat['bot'] = [int(np.round(ptat (vdd['top']) / len (ptat['top'])))]
         
         # ------ Return -------------------------------------------------------
         if measure_vdd:
