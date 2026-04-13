@@ -423,7 +423,7 @@ class HTPA32x32d:
             vdd['bot'] = sum (vdd['bot']) / len (vdd['bot'])
         else:
             ptat['top'] = sum (ptat['top']) / len (ptat['top'])
-            ptat['top'] = sum (ptat['bot']) / len (ptat['bot'])
+            ptat['bot'] = sum (ptat['bot']) / len (ptat['bot'])
         
         # ------ Return -------------------------------------------------------
         if measure_vdd:
@@ -915,17 +915,11 @@ class HTPA32x32d:
           [128..255] bottom-half electrical offsets
         """
         
-        eloff: dict[str, list[int]] = \
-            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
-             for b in range(4)}
+        eloff: dict[str, list[int]] = {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX}
                 
-        ptat: dict[str, list[int]] = \
-            {b: {'top': [0] , 'bot': [0] } \
-             for b in range(4)}
+        ptat: dict[str, list[int]] = {'top': [] , 'bot': [] }
 
-        vdd: dict[str, list[int]] = \
-         {b: {'top': [0] , 'bot': [0] } \
-          for b in range(4)}
+        vdd: dict[str, list[int]] = {'top': [] , 'bot': [] }
         
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
