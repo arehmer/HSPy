@@ -291,8 +291,8 @@ class HTPA32x32d:
                
         while not self.i2c_stop.is_set():
             
-            data_dict = self.read_frame(meas_vdd = True)                         # read pixels, ptat, vdd
-            data_dict.update(self.read_electrical_offsets(meas_vdd = False))     # read electrical offsets
+            data_dict = self.read_frame(measure_vdd = True)                         # read pixels, ptat, vdd
+            data_dict.update(self.read_electrical_offsets(measure_vdd = False))     # read electrical offsets
             
             self.i2c_queue.put(data_dict)                                        # put in queue, blocks if full (backpressure)
 
