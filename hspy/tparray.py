@@ -1243,13 +1243,15 @@ class TPArray():
         
         ptat_av = df_meas[self._PTAT].mean()
         
-        ptat_grad = self.BCC['ptatGrad']s
+        ptat_grad = self.BCC['ptatGrad']
         ptat_off = self.BCC['ptatOffset']
         
         Tamb0 = ptat_av*ptat_grad+ptat_off
         
         dtype = df_meas.loc[self._T_amb].dtypes
         df_meas.loc[self._T_amb] = Tamb0.astype(dtype)
+        
+        return df_meas
         
     
     def frame_to_blocks(self,frame:np.ndarray,**kwargs)->dict:

@@ -303,15 +303,15 @@ class HTPA32x32d:
         format (sorting, rearranging, conversion)
         """
         
-        timeout = self._calib['t_fr4'] * 4 * 1.1                        # timeout is frame conversion time + 10 %
+        timeout = self._calib['t_fr4'] * 4 * 1.1                        # ms, timeout is frame conversion time + 10 %
         
         while not self.i2c_stop.is_set():
             try:
-                raw_data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
+                raw_data = self.i2c_queue.get(timeout=timeout/1E3)         # blocks until data arrives, or times out
                 proc_data = self.convert_i2c_data(raw_data)            # convert raw i2c data in place
                 
                 print(proc_data['pixels'][0:5])
-            except self.i2c_queue.Empty:
+            except queue.Empty:
                 continue                                          # no data yet, loop and check stop_event
     
     # ── Continuous frame readout  ────────────────────────────────────────────
