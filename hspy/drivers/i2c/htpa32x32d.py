@@ -582,7 +582,7 @@ class HTPA32x32d:
         
         data['V_ThComp'] = V_ThComp         # store for debugging
         
-        V_comp = data['pixels'] - V_ThComp  s# apply compensation
+        V_comp = data['pixels'] - V_ThComp  # apply compensation
               
         # ------------- 12.3 Electrical Offset --------------------------------
         V_ElComp = data['eloff']
