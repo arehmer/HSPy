@@ -297,7 +297,7 @@ class HTPA32x32d:
             self.i2c_queue.put(data_dict)                                        # put in queue, blocks if full (backpressure)
 
             
-    def convert_thread(self):
+    def convert_thread(self,applyCalib:bool=True):
         """
         Threadable function for converting raw i2c data into the appropriate 
         format (sorting, rearranging, conversion)
@@ -309,6 +309,12 @@ class HTPA32x32d:
             try:
                 raw_data = self.i2c_queue.get(timeout=timeout/1E3)         # blocks until data arrives, or times out
                 proc_data = self.convert_i2c_data(raw_data)            # convert raw i2c data in place
+                
+                if applyCalib:
+                    
+                    # Calculcate Temperatures from pixel voltages
+                    temp_data = self.apply_calib(proc_data)
+                    
                 
                 print(proc_data['pixels'][0:5])
             except queue.Empty:
@@ -563,8 +569,8 @@ class HTPA32x32d:
         
         
         # ------------- 12.2 Thermal Offset -----------------------------------
-        Th_grad = c["thgrad"]
-        Th_off  = c["thoffset"]        
+        Th_grad = c["thgrad_sort_arr"]
+        Th_off  = c["thoffset_arr"]        
         gradScale = c["gradscale"]
       
         V_ThComp = + (Th_grad * PTAT_avg) / 2**(gradScale) + Th_off
@@ -716,13 +722,16 @@ class HTPA32x32d:
         c["thoffset"]      = i16_arr(_EEP_THOFFSET, _PIXELS)
         c["pij"]           = u16_arr(_EEP_PIJ,      _PIXELS)
         
+        
+        
+        
         # Rearrange per-pixel arrays to correspond to actual pixel order
         c["thgrad_arr"] =  np.hstack([c["thgrad"][0:_HALF],
-                                     np.flip(c["thgrad"][_HALF::])])
+                                     np.flip(c["thgrad"][_HALF::])]).reshape((_ROWS,_COLS))
         c["thoffset_arr"] =  np.hstack([c["thoffset"][0:_HALF],
-                                       np.flip(c["thoffset"][_HALF::])])
-        c[""] =  np.hstack([c["pij"][0:_HALF],
-                                  np.flip(c["pij"][_HALF::])])
+                                       np.flip(c["thoffset"][_HALF::])]).reshape((_ROWS,_COLS))
+        c["pij_arr"] =  np.hstack([c["pij"][0:_HALF],
+                                  np.flip(c["pij"][_HALF::])]).reshape((_ROWS,_COLS))
 
         # VDD compensation arrays (256 entries each)
         c["vddcompgrad"]   = i16_arr(_EEP_VDDCOMPGRAD, 256)
@@ -750,9 +759,14 @@ class HTPA32x32d:
         top = np.array(top).reshape((_BLOCKS_,_COLS))
         bot = np.array(bot).reshape((_BLOCKS_,_COLS))
         
-        top = np.tile(top,(_BLOCKS_,))
-        bot = np.tile(bot,(_BLOCKS_,))
+        # Flip bottom half
+        bot = np.flipud(bot)
         
+        # Repeat blocks using tile
+        top = np.tile(top,(_BLOCKS_,1))
+        bot = np.tile(bot,(_BLOCKS_,1))
+        
+        # Concatenate to one array
         array = np.vstack([top,bot])
         
         return array
