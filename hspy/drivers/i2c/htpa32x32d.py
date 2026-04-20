@@ -498,7 +498,7 @@ class HTPA32x32d:
             
             topbot = top + bot
             
-            eloff_array = self._blocks_to_array(topbot)
+            eloff_array = self._sort_perBlock_calibData(topbot)
         
         data = {}
         
@@ -749,13 +749,13 @@ class HTPA32x32d:
         c["vddcompoff"]    = i16_arr(_EEP_VDDCOMPOFF,  256)
         
         # Reshape VDD calibration data to array of same dimension as pixels
-        c["vddcompgrad_arr"] = self._blocks_to_array(c["vddcompgrad"])
-        c["vddcompoff_arr"] = self._blocks_to_array(c["vddcompoff"])
+        c["vddcompgrad_arr"] = self._sort_perBlock_calibData(c["vddcompgrad"])
+        c["vddcompoff_arr"] = self._sort_perBlock_calibData(c["vddcompoff"])
         
 
         self._calib = c
         
-    def _blocks_to_array(self,block_data:list) -> np.ndarray:
+    def _sort_perBlock_calibData(self,block_data:list) -> np.ndarray:
         
         # Check input size 
         expected_len = _PIXELS / _BLOCKS_
@@ -777,11 +777,16 @@ class HTPA32x32d:
         top = np.tile(top,(_BLOCKS_,1))
         bot = np.tile(bot,(_BLOCKS_,1))
         
-        # Concatenate to one array
-        array = np.vstack([top,bot]).flatten()
+        # Concatenate and return
+        return np.vstack([top,bot]).flatten()
         
-        return array
+    def _sort_perPixel_calibData(self,calib:list):
         
+        top = np.array(calib[0:_HALF]).reshape((_ROWS/2,_COLS))
+        bot =  np.flipud(np.array(calib[_HALF::]).reshape((_ROWS/2,_COLS)))
+        
+        # Concatenate and return
+        return np.vstack([top,bot]).flatten()
 
     def load_lut(
         self,
