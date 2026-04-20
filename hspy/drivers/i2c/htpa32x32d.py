@@ -619,7 +619,7 @@ class HTPA32x32d:
             
         V_comp = V_comp * PCSCELEVAL / PixCij
             
-        data['pixels_comp'] = V_comp
+        data['pixels_comp'] = data['pixels'] - V_ThComp
         
 
         # ── Step 6: Replace dead pixels with neighbour average ────────────
