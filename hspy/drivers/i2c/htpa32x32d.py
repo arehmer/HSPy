@@ -731,7 +731,7 @@ class HTPA32x32d:
         c["thoffset_arr"] =  np.hstack([c["thoffset"][0:_HALF],
                                        np.flip(c["thoffset"][_HALF::])]).reshape((_ROWS,_COLS)).flatten()
         c["pij_arr"] =  np.hstack([c["pij"][0:_HALF],
-                                  np.flip(c["pij"][_HALF::])]).reshape((_ROWS,_COLS))
+                                  np.flip(c["pij"][_HALF::])]).reshape((_ROWS,_COLS)).flatten()
 
         # VDD compensation arrays (256 entries each)
         c["vddcompgrad"]   = i16_arr(_EEP_VDDCOMPGRAD, 256)
