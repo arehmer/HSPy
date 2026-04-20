@@ -465,9 +465,11 @@ class HTPA32x32d:
                     pix_array[block*_BLOCK_PX:(block+1)*_BLOCK_PX] = top
                     
                     if block == 0:
-                        pix_array[(-block-1)*_BLOCK_PX::] = bot
+                        pix_array[(-block-1)*_BLOCK_PX::] = \
+                            np.fliplr(np.array(bot).reshape((1,-1)))
                     else:
-                        pix_array[(-block-1)*_BLOCK_PX:-block*_BLOCK_PX] = bot
+                        pix_array[(-block-1)*_BLOCK_PX:-block*_BLOCK_PX] = \
+                            np.fliplr(np.array(bot).reshape((1,-1)))
                         
             pix_array = pix_array.reshape((_COLS,_ROWS))
 
@@ -765,10 +767,7 @@ class HTPA32x32d:
         
         top = np.array(top).reshape((_BLOCKS_,_COLS))
         bot = np.array(bot).reshape((_BLOCKS_,_COLS))
-        
-        # Flip bottom half
-        bot = np.flipud(bot)
-        
+                
         # Repeat blocks using tile
         top = np.tile(top,(_BLOCKS_,1))
         bot = np.tile(bot,(_BLOCKS_,1))
