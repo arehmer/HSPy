@@ -1,5 +1,11 @@
-import hspy
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 20 15:57:00 2026
 
-i2c = hspy.drivers.i2c.HTPA32x32d(1)
-i2c.open()
-i2c.read_status()
+@author: rehmer
+"""
+import pickle as pkl
+import matplotlib.pyplot as plt
+
+
+frame = pkl.load(open('raspi_frame.pkl','rb'))
