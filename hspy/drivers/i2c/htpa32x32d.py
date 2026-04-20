@@ -297,7 +297,7 @@ class HTPA32x32d:
             self.i2c_queue.put(data_dict)                                        # put in queue, blocks if full (backpressure)
 
             
-    def convert_thread(self,applyCalib:bool=True):
+    def postprocessing_thread(self,applyCalib:bool=True):
         """
         Threadable function for converting raw i2c data into the appropriate 
         format (sorting, rearranging, conversion)
@@ -316,7 +316,7 @@ class HTPA32x32d:
                     temp_data = self.apply_calib(proc_data)
                     
                 
-                print(proc_data['pixels'][0:5])
+                print(temp_data['pixels_comp'][0:5])
             except queue.Empty:
                 continue                                          # no data yet, loop and check stop_event
     
@@ -333,7 +333,7 @@ class HTPA32x32d:
         
         
         t_reader    = threading.Thread(target=self.read_thread)
-        t_conv      = threading.Thread(target=self.convert_thread)
+        t_conv      = threading.Thread(target=self.postprocessing_thread)
         
         t_reader.start()
         t_conv.start()
