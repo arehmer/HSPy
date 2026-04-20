@@ -569,7 +569,7 @@ class HTPA32x32d:
         
         
         # ------------- 12.2 Thermal Offset -----------------------------------
-        Th_grad = c["thgrad_sort_arr"]
+        Th_grad = c["thgrad_arr"]
         Th_off  = c["thoffset_arr"]        
         gradScale = c["gradscale"]
       
