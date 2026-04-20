@@ -9,3 +9,8 @@ import matplotlib.pyplot as plt
 
 
 frame = pkl.load(open('raspi_frame.pkl','rb'))
+
+
+frame_calib = frame['pixels'] - frame['V_ElComp'] - frame['V_ThComp'] - frame['V_VddComp']
+
+plt.imshow(frame_calib.reshape((32,32)))
