@@ -580,16 +580,18 @@ class HTPA32x32d:
       
         V_ThComp = + (Th_grad * PTAT_avg) / 2**(gradScale) + Th_off
         
-        # V_comp = data['pixels'] - V_ThComp
+        data['V_ThComp'] = V_ThComp         # store for debugging
         
-        data['V_ThComp'] = V_ThComp
-        
-      
+        V_comp = data['pixels'] - V_ThComp  s# apply compensation
+              
         # ------------- 12.3 Electrical Offset --------------------------------
         V_ElComp = data['eloff']
         
-        # V_comp = V_comp - V_ElComp
-        data['V_ElComp'] = V_ElComp
+        data['V_ElComp'] = V_ElComp         # store for debugging
+        
+        V_comp = V_comp - V_ElComp          # apply compensation
+        
+        
         # ------------- 12.4 Vdd Compensation- --------------------------------
         VddCompGrad = c["vddcompgrad_arr"]
         VddCompOff  = c["vddcompoff_arr"]
@@ -610,8 +612,10 @@ class HTPA32x32d:
                 (VDD_avg - VddTh1 - ((VddTh2-VddTh1)/(PTAT_Th2-PTAT_Th1)) * \
                  (PTAT_avg-PTAT_Th1))
          
-        # V_comp = V_comp - V_VddComp
-        data['V_VddComp'] = V_VddComp
+        data['V_VddComp'] = V_VddComp       # store for debugging
+        
+        V_comp = V_comp - V_VddComp         # apply compensation
+        
         # ------------- 12.5 Object Temperature -------------------------------
         Pij         = c["pij_arr"]
         PixC_max    = c["pixcmax"]
@@ -625,12 +629,10 @@ class HTPA32x32d:
             eps/100 * GlobalGain/10000
         
             
-        data['scale'] = PCSCELEVAL / PixCij
+        data['scale'] = PCSCELEVAL / PixCij   # store for debugging       
             
-        # data['pixels_comp'] = V_comp
+        data['pixels_comp'] = V_comp * PCSCELEVAL / PixCij
         
-         # = V_ThComp
-
         # ── Step 6: Replace dead pixels with neighbour average ────────────
         # self._apply_pixel_masking(results, c)
 
@@ -767,7 +769,10 @@ class HTPA32x32d:
         
         top = np.array(top).reshape((_BLOCKS_,_COLS))
         bot = np.array(bot).reshape((_BLOCKS_,_COLS))
-                
+             
+        # Flip the bottom readout
+        bot = np.flipud(bot)
+        
         # Repeat blocks using tile
         top = np.tile(top,(_BLOCKS_,1))
         bot = np.tile(bot,(_BLOCKS_,1))
