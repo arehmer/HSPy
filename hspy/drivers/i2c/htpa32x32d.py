@@ -779,8 +779,8 @@ class HTPA32x32d:
         
     def _sort_perPixel_calibData(self,calib:list):
         
-        top = np.array(calib[0:_HALF]).reshape((_ROWS/2,_COLS))
-        bot =  np.flipud(np.array(calib[_HALF::]).reshape((_ROWS/2,_COLS)))
+        top = np.array(calib[0:_HALF]).reshape((int(_ROWS/2),_COLS))
+        bot =  np.flipud(np.array(calib[_HALF::]).reshape((int(_ROWS/2),_COLS)))
         
         # Concatenate and return
         return np.vstack([top,bot]).flatten()
