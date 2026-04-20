@@ -727,9 +727,9 @@ class HTPA32x32d:
         
         # Rearrange per-pixel arrays to correspond to actual pixel order
         c["thgrad_arr"] =  np.hstack([c["thgrad"][0:_HALF],
-                                     np.flip(c["thgrad"][_HALF::])]).reshape((_ROWS,_COLS))
+                                     np.flip(c["thgrad"][_HALF::])]).reshape((_ROWS,_COLS)).flatten()
         c["thoffset_arr"] =  np.hstack([c["thoffset"][0:_HALF],
-                                       np.flip(c["thoffset"][_HALF::])]).reshape((_ROWS,_COLS))
+                                       np.flip(c["thoffset"][_HALF::])]).reshape((_ROWS,_COLS)).flatten()
         c["pij_arr"] =  np.hstack([c["pij"][0:_HALF],
                                   np.flip(c["pij"][_HALF::])]).reshape((_ROWS,_COLS))
 
@@ -767,7 +767,7 @@ class HTPA32x32d:
         bot = np.tile(bot,(_BLOCKS_,1))
         
         # Concatenate to one array
-        array = np.vstack([top,bot])
+        array = np.vstack([top,bot]).flatten()
         
         return array
         
