@@ -578,13 +578,16 @@ class HTPA32x32d:
       
         V_ThComp = + (Th_grad * PTAT_avg) / 2**(gradScale) + Th_off
         
-        V_comp = data['pixels'] - V_ThComp
+        # V_comp = data['pixels'] - V_ThComp
+        
+        data['V_ThComp'] = V_ThComp
+        
       
         # ------------- 12.3 Electrical Offset --------------------------------
         V_ElComp = data['eloff']
         
-        V_comp = V_comp - V_ElComp
-        
+        # V_comp = V_comp - V_ElComp
+        data['V_ElComp'] = V_ElComp
         # ------------- 12.4 Vdd Compensation- --------------------------------
         VddCompGrad = c["vddcompgrad_arr"]
         VddCompOff  = c["vddcompoff_arr"]
@@ -605,8 +608,8 @@ class HTPA32x32d:
                 (VDD_avg - VddTh1 - ((VddTh2-VddTh1)/(PTAT_Th2-PTAT_Th1)) * \
                  (PTAT_avg-PTAT_Th1))
          
-        V_comp = V_comp - V_VddComp
-        
+        # V_comp = V_comp - V_VddComp
+        data['V_VddComp'] = V_VddComp
         # ------------- 12.5 Object Temperature -------------------------------
         Pij         = c["pij_arr"]
         PixC_max    = c["pixcmax"]
@@ -620,10 +623,11 @@ class HTPA32x32d:
             eps/100 * GlobalGain/10000
         
             
-        V_comp = V_comp * PCSCELEVAL / PixCij
+        data['scale'] = PCSCELEVAL / PixCij
             
-        data['pixels_comp'] = V_comp
+        # data['pixels_comp'] = V_comp
         
+         # = V_ThComp
 
         # ── Step 6: Replace dead pixels with neighbour average ────────────
         # self._apply_pixel_masking(results, c)
