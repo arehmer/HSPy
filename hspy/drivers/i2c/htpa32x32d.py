@@ -451,7 +451,7 @@ class HTPA32x32d:
         n_ptat = 2
         n_vdd = 2
         
-        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                # zero array for storing rearranged pixel data 
+        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16).flatten()      # zero array for storing rearranged pixel data 
         ptat_array = np.zeros((n_ptat,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
         vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                     # zero array for storing rearranged ptat data 
 
@@ -462,12 +462,15 @@ class HTPA32x32d:
                     top = raw_data['pixels'][block]['top']      # block data from top half
                     bot = raw_data['pixels'][block]['bot']      # block data from bottom half
                     
-                    for r in range(n_blocks):
+                    pix_array[block*_BLOCK_PX:(block+1)*_BLOCK_PX] = top
                     
-                        pix_array[block+r*n_blocks,:] = \
-                            top[_COLS*r:_COLS*(r+1)]
-                        pix_array[_ROWS-1-block-r*n_blocks,:] = \
-                            bot[_COLS*r:_COLS*(r+1)]
+                    if block == 0:
+                        pix_array[(-block-1)*_BLOCK_PX::] = bot
+                    else:
+                        pix_array[(-block-1)*_BLOCK_PX:-block*_BLOCK_PX] = bot
+                        
+            pix_array = pix_array.reshape((_COLS,_ROWS))
+
                                 
         if 'ptat' in raw_data.keys():
             
@@ -1024,7 +1027,7 @@ class HTPA32x32d:
                 break
         else:
             ci = len(ta_cols) - 2
-
+        
         # Row index (digit axis)
         ri = 0
         for i in range(len(dig_rows) - 1):
