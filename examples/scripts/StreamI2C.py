@@ -58,7 +58,7 @@ arg_parser = argparse.ArgumentParser(prog = 'StreamI2C.py',
                                      description="Starts a continuous live-stream of an HTPA device connected via I2C.")
 
 # %% Add arguments using '--key' style
-arg_parser.add_argument("--i2cbus",
+arg_parser.add_argument("--bus",
                         dest = "bus",
                         type=int,
                         required=True,
@@ -74,7 +74,6 @@ arg_parser.add_argument("--i2cbus",
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
-imshow = args.imshow
 
 # %% Main loop
 if __name__ == '__main__':
@@ -82,36 +81,7 @@ if __name__ == '__main__':
     # # %% Create instance of i2c driver
     i2c_driver = I2C_HTPA32x32d(bus)
     
-    # udp_reader = HTPA_UDPReader()
-    
-    # # %% Broadcast looking for devices
-    # devices = udp_reader.broadcast(bcast_addr)
-    
-    # # If no devices found, end script
-    # if len( udp_reader.devices.index) == 0:
-    #     raise ValueError('No devices found.')
-    
-    # # Get user input on which device to bind
-    # while True:
-    #     try:
-    #         DevID = int(input('Enter the device number of the HTPA device to bind: ' ))
-    #         if DevID in udp_reader.devices.index:
-    #             break
-    #         else:
-    #             print(f'HTPA device with ID {DevID} not discovered.')
-    #     except ValueError:
-    #         print("Please enter a valid integer.")
-    
-    
-    # # Get the ArrayType of the selected device
-    # ArrayType = devices.loc[DevID,'Arraytype']
-    
-    # # Set the ArrayType of the HTPA_UDPReader class
-    # udp_reader.ArrayType = ArrayType
-    
-    # # Create threads which bind the device, receive the udp packages and 
-    # # plot the frame
-    
+   
     # Create buffer for i2c data
     i2c_buffer = Queue(maxsize=10)
     
@@ -126,39 +96,6 @@ if __name__ == '__main__':
     i2c_driver.start_i2cstream()
     reader_thread.start()
     
-    # # Create condition variables for thread synchronization
-    # udp_buffer_lock = Condition()
-
-    # # Create instance of UDP thread 
-    # udp_thread = UDP(udp_reader = udp_reader,
-    #                  DevID = DevID,
-    #                  Bcast_Addr = bcast_addr,
-    #                  write_buffer = udp_buffer,
-    #                  write_condition = udp_buffer_lock)
-        
-    # # Distinguish between the cases of plotting the sensor stream or not
-    # if imshow: 
-    #     # Create instance of Imshow thread for plotting using cv2.imshow
-    #     plot_thread = Imshow(ArrayType = ArrayType,
-    #                          read_buffer = udp_buffer,
-    #                          read_condition = udp_buffer_lock)
-            
-    # elif not imshow:
-    #     # Create a dummy read thread, that only empties the queue and releases 
-    #     # the lock on the writing condition
-    #     def dummy_target():
-    #         udp_buffer.get()  # drain one item from the queue each cycle
-        
-    #     plot_thread = RThread(target = dummy_target,
-    #                           read_buffer = udp_buffer,
-    #                           read_condition = udp_buffer_lock)
-        
-        
-        
-    # # Start the threads
-    # udp_thread.start()
-    # plot_thread.start()
-
     # Let threads run 20 seconds
     time.sleep(10)
     
