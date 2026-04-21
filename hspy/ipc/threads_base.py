@@ -245,7 +245,7 @@ class RThread_R1(Thread):
             # Execute target function
             result = self._target_function()
             
-            print(result['Tamb0'])
+            print(result['Tamb'])
             
                 
                        
