@@ -257,8 +257,6 @@ class RThread_R1(Thread):
         return upstream_dict
             
     def stop(self):
-        with self.read_condition:
-            self._exit = True
-            self.read_condition.notify_all()
+        self._exit.set()
 
             
