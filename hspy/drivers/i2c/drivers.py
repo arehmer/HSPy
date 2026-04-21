@@ -353,7 +353,7 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         """
         
-        if self._out_queue is None:
+        if self.output_queue is None:
             raise RuntimeError("Set an output queue before starting the stream.")
         
         self.i2c_stop.clear()
@@ -367,7 +367,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._t_process.start()
        
         
-    def stop(self):
+    def stop_i2cstream(self):
         
         self.i2c_stop.set()
         self._t_reader.join()
