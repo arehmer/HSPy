@@ -131,13 +131,27 @@ _F_CLK_MAX       = 13     # MHz, max. clock frequency
 _N_PTAT           = 8      # Number of PTATs
 
 
+class I2C_Driver:
+    pass
+
 # ─────────────────────────────────────────────────────────────────────────────
-class HTPA32x32dError(Exception):
+class I2C_HTPA32x32dError(Exception):
     """Raised on I2C communication or data errors."""
+    
+    def __init__(self):
+        
+        self._output_queue = None
 
+    @property
+    def output_queue(self,q:queue):
+        return self._output_queue
+    @output_queue.setter
+    def output_queue(self,q:queue):
+        self._output_queue = q
+    
 
 # ─────────────────────────────────────────────────────────────────────────────
-class HTPA32x32d:
+class I2C_HTPA32x32d(I2C_Driver):
     """
     Full I2C driver for the HTPA32x32dR2L1.7/0.8 thermopile array sensor.
 
@@ -170,6 +184,10 @@ class HTPA32x32d:
         eeprom_addr : 7-bit EEPROM address (default 0x50)
         timeout_ms  : Maximum wait time for end-of-conversion
         """
+        
+        # Call constructor of parent class
+        super(I2C_HTPA32x32d,self).__init__()
+        
         self._bus_num    = bus
         self._addr       = i2c_addr
         self._eep_addr   = eeprom_addr
@@ -284,7 +302,7 @@ class HTPA32x32d:
 
 
     
-    def read_thread(self):
+    def _read_thread(self):
         """
         Threadable function for i2c readouts 
         """
@@ -294,34 +312,38 @@ class HTPA32x32d:
             data_dict = self.read_frame(measure_vdd = True)                         # read pixels, ptat, vdd
             data_dict.update(self.read_electrical_offsets(measure_vdd = False))     # read electrical offsets
             
-            self.i2c_queue.put(data_dict)                                        # put in queue, blocks if full (backpressure)
+            self.i2c_queue.put(data_dict)                                           # put in queue, blocks if full (backpressure)
 
             
-    def postprocessing_thread(self,applyCalib:bool=True):
+    def _processing_thread(self,applyCalib:bool=True):
         """
         Threadable function for converting raw i2c data into the appropriate 
         format (sorting, rearranging, conversion)
         """
         
-        timeout = self._calib['t_fr4'] * 4 * 1.1                        # ms, timeout is frame conversion time + 10 %
+        timeout = self._calib['t_fr4'] * 4 / 1e3 * 1.1                 # ms, timeout is frame conversion time + 10 %
         
         while not self.i2c_stop.is_set():
+      
             try:
-                raw_data = self.i2c_queue.get(timeout=timeout/1E3)         # blocks until data arrives, or times out
+                raw_data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
                 proc_data = self.convert_i2c_data(raw_data)            # convert raw i2c data in place
                 
                 if applyCalib:
                     
                     # Calculcate Temperatures from pixel voltages
                     temp_data = self.apply_calib(proc_data)
+                                    
+                self.output_queue.put(temp_data)
                     
-                
-                print(temp_data['pixels_comp'][0:5])
             except queue.Empty:
                 continue                                          # no data yet, loop and check stop_event
+                
+            except Exception as e:
+                print(f"[processing_thread] {e}")                
     
     # ── Continuous frame readout  ────────────────────────────────────────────
-    def start_stream(self):
+    def start_i2cstream(self):
         """
         Acquire complete frames in a loop
 
@@ -331,24 +353,25 @@ class HTPA32x32d:
 
         """
         
+        if self._out_queue is None:
+            raise RuntimeError("Set an output queue before starting the stream.")
         
-        t_reader    = threading.Thread(target=self.read_thread)
-        t_conv      = threading.Thread(target=self.postprocessing_thread)
+        self.i2c_stop.clear()
         
-        t_reader.start()
-        t_conv.start()
-
-        time.sleep(5)
+        self._t_reader = threading.Thread(target=self._read_thread,
+                                          daemon = True)
+        self._t_processor = threading.Thread(target=self._processing_thread,
+                                             daemon = True)
+        
+        self._t_reader.start()
+        self._t_process.start()
+       
+        
+    def stop(self):
         
         self.i2c_stop.set()
-        
-        t_reader.join()
-        t_conv.join()
-
-        
-    def stop_stream(self):
-        
-        pass
+        self._t_reader.join()
+        self._t_processor.join()
 
     # ── Single Frame readout ─────────────────────────────────────────────────
 
@@ -555,7 +578,7 @@ class HTPA32x32d:
         Returns list[1024] of temperatures in °C.
         """
         if not self._calib:
-            raise HTPA32x32dError(
+            raise I2C_HTPA32x32dError(
                 "Calibration not loaded. Call init() or load_calibration() first."
             )
 
@@ -926,7 +949,7 @@ class HTPA32x32d:
         deadline = time.monotonic() + self._timeout_ms * 1e-3
         while not self.is_eoc():
             if time.monotonic() > deadline:
-                raise HTPA32x32dError(
+                raise I2C_HTPA32x32dError(
                     f"Timeout ({self._timeout_ms} ms) waiting for EOC."
                 )
             time.sleep(_T_POLL_MS * 1e-3)

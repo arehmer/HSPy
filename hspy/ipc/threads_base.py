@@ -5,7 +5,7 @@ Created on Thu Feb  8 16:12:35 2024
 @author: rehmer
 """
 
-from threading import Thread
+from threading import Thread, Event
 from threading import Condition
 from queue import Queue
 
@@ -134,6 +134,43 @@ class WThread(Thread):
     def stop(self):
         self._exit = True
         
+class WThread_R1(Thread):
+    """
+    Simplification of WThread. Solves two problems:
+        1. Condition is redundant with Queue: queue.Queue is already 
+        thread-safe and has its own internal locking
+        2. The wait-loop logic defeats the purpose of threading: 
+            self.write_condition.wait(timeout=0.5) makes WThread block until 
+            the downstream thread has consumed the item
+    """   
+    
+    def __init__(self,
+                 write_buffer: Queue,
+                 **kwargs):
+        
+        super().__init__(**kwargs)
+        self.write_buffer = write_buffer
+        self._exit = Event()
+        self.daemon = True  # dies automatically if main thread exits
+
+    def run(self):
+        
+        # Check if thread has been stopped
+        while not self._exit.is_set():
+            
+            # Execute target function
+            result = self._target()
+            
+            # Write result to buffer
+            self.write_buffer.put(result)  # blocks naturally if queue is full
+            
+    def _target_function(self):
+        """Override in subclass to produce data."""
+        raise NotImplementedError
+
+    def stop(self):
+        self._exit.set()
+        
         
 class RThread(Thread):
     """
@@ -182,3 +219,46 @@ class RThread(Thread):
         with self.read_condition:
             self._exit = True
             self.read_condition.notify_all()
+            
+            
+class RThread_R1(Thread):
+    """
+    Base class for a thread that reads from a buffer
+    """
+    def __init__(self,
+                 read_buffer:Queue,
+                 **kwargs):
+        
+        super().__init__(**kwargs)
+        
+        self.read_buffer = read_buffer
+        self._exit = Event()
+        self.daemon = True  # dies automatically if main thread exits
+        
+        
+        
+    def run(self):
+        
+        # Check if thread has been stopped
+        while not self._exit.is_set():
+                        
+            # Execute target function
+            result = self._target_function()
+            
+            print(result['Tamb0'])
+            
+                
+                       
+    def _target_function(self):
+
+        # Get result from upstream thread
+        upstream_dict = self.read_buffer.get()
+    
+        return upstream_dict
+            
+    def stop(self):
+        with self.read_condition:
+            self._exit = True
+            self.read_condition.notify_all()
+
+            
