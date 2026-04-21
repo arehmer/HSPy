@@ -80,7 +80,7 @@ if __name__ == '__main__':
     
     # # %% Create instance of i2c driver
     i2c_driver = I2C_HTPA32x32d(bus)
-    
+    i2c_driver.init()
    
     # Create buffer for i2c data
     i2c_buffer = Queue(maxsize=10)

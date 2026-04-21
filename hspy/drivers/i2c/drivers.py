@@ -210,6 +210,9 @@ class I2C_HTPA32x32d(I2C_Driver):
         # Open the I2C bus
         self.open()
         
+        # Initialize the sensor
+        self.init()
+        
     def __enter__(self) -> "I2C_HTPA32x32d":
         self.open()
         return self
