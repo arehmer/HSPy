@@ -18,16 +18,16 @@ Usage Examples
 
 
 Windows PowerShell:
-python ./StreamHTPADevice.py --bcast 192.168.178.255
+python ./StreamI2C.py --bus 1
 
 
 Linux shell (bash):
-python ./StreamHTPADevice.py --bcast 192.168.178.255
+python ./StreamI2C.py --bus 1
 
 
 Command-line Arguments
 ======================
---bcast : str (required)
+--bus : int (required)
 Broadcast address used to detect HTPA devices on the network.
 
 

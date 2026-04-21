@@ -210,7 +210,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         # Open the I2C bus
         self.open()
         
-    def __enter__(self) -> "HTPA32x32d":
+    def __enter__(self) -> "I2C_HTPA32x32d":
         self.open()
         return self
 
@@ -364,7 +364,7 @@ class I2C_HTPA32x32d(I2C_Driver):
                                              daemon = True)
         
         self._t_reader.start()
-        self._t_process.start()
+        self._t_processor.start()
        
         
     def stop_i2cstream(self):
