@@ -16,9 +16,7 @@ class RWThread_R1(Thread):
     """
     def __init__(self,
                  read_buffer:Queue,
-                 read_condition:Condition,
                  write_buffer:Queue,
-                 write_condition:Condition,
                  **kwargs):
 
         self.read_buffer = read_buffer
