@@ -336,7 +336,8 @@ class I2C_HTPA32x32d(I2C_Driver):
                     
                     # Calculcate Temperatures from pixel voltages
                     temp_data = self.apply_calib(proc_data)
-                                    
+                
+                temp_data['success'] = True
                 self.output_queue.put(temp_data)
                     
             except queue.Empty:
