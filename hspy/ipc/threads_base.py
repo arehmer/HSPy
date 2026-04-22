@@ -7,9 +7,53 @@ Created on Thu Feb  8 16:12:35 2024
 
 from threading import Thread, Event
 from threading import Condition
+import queue
 from queue import Queue
 
+class RWThread_R1(Thread):
+    """
+    Base class for a thread that reads from one buffer and writes into another
+    """
+    def __init__(self,
+                 read_buffer:Queue,
+                 read_condition:Condition,
+                 write_buffer:Queue,
+                 write_condition:Condition,
+                 **kwargs):
 
+        self.read_buffer = read_buffer
+        self.read_condition = read_condition
+        
+        self.write_buffer = write_buffer
+        self.write_condition = write_condition
+        
+        self._exit = False               # Exit flag 
+
+        super().__init__(**kwargs)
+    
+    def run(self):
+        
+        # Check if thread has been stopped
+        while not self._exit.is_set():
+            
+            try:
+                
+                # Retrieve data
+                data_upstream = self.read_buffer.get(timeout=1.0)  # blocks until data arrives
+                
+                # Process data
+                result = self._process(data_upstream)
+                
+                # Put result into downstream buffer
+                self.write_buffer.put(result)
+                
+            except queue.Empty:
+                continue
+            
+    def _process(self,data:dict):
+        """Override in subclass"""
+        raise NotImplementedError
+                
 
 class RWThread(Thread):
     """
@@ -164,7 +208,7 @@ class WThread_R1(Thread):
             # Write result to buffer
             self.write_buffer.put(result)  # blocks naturally if queue is full
             
-    def _target_function(self):
+    def _target(self):
         """Override in subclass to produce data."""
         raise NotImplementedError
 
@@ -243,18 +287,14 @@ class RThread_R1(Thread):
         while not self._exit.is_set():
                         
             # Execute target function
-            result = self._target_function()
+            result = self._target()
             
             print(result['Tamb'])
-            
-                
                        
-    def _target_function(self):
-
-        # Get result from upstream thread
-        upstream_dict = self.read_buffer.get()
-    
-        return upstream_dict
+    def _target(self):
+        """Override in subclass to produce data."""
+        
+        raise NotImplementedError
             
     def stop(self):
         self._exit.set()

@@ -62,7 +62,7 @@ arg_parser.add_argument("--bus",
                         dest = "bus",
                         type=int,
                         required=True,
-                        help="Specifies I2C bus that htpa device is connected to.")
+                        help="I2C bus that HTPA device is connected to.")
 
 # arg_parser.add_argument("--no-imshow",
 #                         dest = "imshow",
@@ -82,7 +82,7 @@ if __name__ == '__main__':
     i2c_driver = I2C_HTPA32x32d(bus)
     i2c_driver.init()
    
-    # Create buffer for i2c data
+    # Create and set buffer for i2c data
     i2c_buffer = Queue(maxsize=10)
     
     i2c_driver.output_queue = i2c_buffer

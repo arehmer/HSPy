@@ -19,7 +19,7 @@ from datetime import datetime
 import pickle as pkl
 import csv
 
-from hspytools.ipc.threads_base import WThread,RThread, RWThread
+from hspytools.ipc.threads_base import WThread,RThread, RWThread, RThread_R1
 from hspytools.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 
@@ -625,7 +625,7 @@ class Record_Thread(RWThread):
     def stop(self):
         self._exit = True
             
-class EMACounting_Thread(RThread):
+class EMACounting_Thread(RThread_R1):
     """
     Thread that counts the number of confirmed tracks per frame, and returns
     an exponential moving average (EMA) of that number via
@@ -641,7 +641,6 @@ class EMACounting_Thread(RThread):
     """
     def __init__(self,
                  read_buffer:Queue,
-                 read_condition:Condition,
                  **kwargs):
         
         # self.T0 = T0                      # Desired time constant of EMA filter in seconds
@@ -658,9 +657,7 @@ class EMACounting_Thread(RThread):
         # self.dT_samples = []              # List of samples to estimate dT from
         
         # Call constructor of parent class
-        super(EMACounting_Thread,self).__init__(target = self._target_function,
-                                                read_buffer = read_buffer,
-                                                read_condition = read_condition,
+        super(EMACounting_Thread,self).__init__(read_buffer = read_buffer,
                                                 **kwargs)
         
     @property
@@ -699,7 +696,7 @@ class EMACounting_Thread(RThread):
         self._k = k
         
         
-    def _target_function(self):
+    def _target(self):
         
         
         # # ---------------------------------------------------------------------
