@@ -20,10 +20,7 @@ class RWThread_R1(Thread):
                  **kwargs):
 
         self.read_buffer = read_buffer
-        self.read_condition = read_condition
-        
         self.write_buffer = write_buffer
-        self.write_condition = write_condition
         
         self._exit = False               # Exit flag 
 
