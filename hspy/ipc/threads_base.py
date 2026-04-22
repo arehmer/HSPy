@@ -22,7 +22,7 @@ class RWThread_R1(Thread):
         self.read_buffer = read_buffer
         self.write_buffer = write_buffer
         
-        self._exit = False               # Exit flag 
+        self._exit = Event()
 
         super().__init__(**kwargs)
     
