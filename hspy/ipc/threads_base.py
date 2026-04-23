@@ -50,7 +50,7 @@ class RWThread_R1(Thread):
                 continue
             
             except Exception as e:
-                print(f"[self.name] {e}")                
+                print(f"[{self.name}] {e}")                  
             
     def _process(self,data:dict):
         """Override in subclass"""
@@ -217,7 +217,7 @@ class WThread_R1(Thread):
                 continue
             
             except Exception as e:
-                print(f"[self.name] {e}")    
+                print(f"[{self.name}] {e}")    
                 
             
     def _target(self):
@@ -303,14 +303,12 @@ class RThread_R1(Thread):
             try:
                 # Execute target function
                 result = self._target()
-                
-                print(result['Tamb'])
-            
+
             except queue.Empty:
                 continue
             
             except Exception as e:
-                print(f"[self.name] {e}")       
+                print(f"[{self.name}] {e}")       
                        
     def _target(self):
         """Override in subclass to produce data."""
