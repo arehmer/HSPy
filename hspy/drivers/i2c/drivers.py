@@ -143,6 +143,7 @@ class I2C_HTPA32x32dError(Exception):
     def __init__(self):
         
         self._output_queue = None
+        self._image_counter = 0
 
     @property
     def output_queue(self,q:queue):
@@ -357,6 +358,12 @@ class I2C_HTPA32x32d(I2C_Driver):
                 
                 # Set success flag
                 data['success'] = True
+                
+                # Add a image counter
+                data['image_id'] = self._image_counter
+                
+                # Increment counter
+                self._image_counter += 1
                 
                 self.output_queue.put(data)
                     
