@@ -115,7 +115,7 @@ if __name__ == '__main__':
     reader_thread.start()
     
     # Let threads run 20 seconds
-    time.sleep(3)
+    time.sleep(20)
     
     # # Stop the threads in reversed order!
     reader_thread.stop()
