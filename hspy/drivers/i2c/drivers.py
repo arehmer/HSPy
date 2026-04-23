@@ -310,7 +310,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         self._calib["F_CLK"] = F_CLK
         self._calib["t_fr4"] = t_fr4
-        self._timeout_ms = t_fr4 / 1e3
+        self._timeout_ms = t_fr4 * 1e3 * 1.1            # Timeout for EOC is conversion time plus 10% 
 
     def sleep(self) -> None:
         """Put sensor into sleep state (~9 µA standby current)."""
@@ -1012,7 +1012,7 @@ class I2C_HTPA32x32d(I2C_Driver):
 
     def _wait_eoc(self) -> None:
         """Poll the status register until EOC is set or the timeout expires."""
-        deadline = time.monotonic() + self._timeout_ms * 1e-3
+        deadline = time.monotonic() + self._timeout_ms / 1e3
         while not self.is_eoc():
             if time.monotonic() > deadline:
                 raise I2C_HTPA32x32dError(
