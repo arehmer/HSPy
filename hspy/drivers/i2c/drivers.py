@@ -351,9 +351,9 @@ class I2C_HTPA32x32d(I2C_Driver):
                     # Calculcate Temperatures from pixel voltages
                     data = self.apply_calib(data)
                     
-                if calcdK:
+                # if calcdK:
                     
-                    data = self.apply_LuT(data)
+                #     data = self.apply_LuT(data)
                 
                 # Set success flag
                 data['success'] = True
