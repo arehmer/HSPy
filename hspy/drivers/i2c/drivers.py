@@ -143,7 +143,7 @@ class I2C_HTPA32x32dError(Exception):
     def __init__(self):
         
         self._output_queue = None
-        self._image_counter = 0
+        
 
     @property
     def output_queue(self,q:queue):
@@ -209,6 +209,9 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._vdd_stack:  List[float] = []
         self._el_offset_stack: List[List[int]] = []
         self._stack_depth = 8
+        
+        # Set a counter for the read frames
+        self._image_counter = 0
         
         # Open the I2C bus
         self.open()
