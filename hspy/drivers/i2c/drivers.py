@@ -348,7 +348,7 @@ class I2C_HTPA32x32d(I2C_Driver):
       
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
-                data = self.convert_i2c_data(data)            # convert raw i2c data in place
+                # data = self.convert_i2c_data(data)            # convert raw i2c data in place
                 
                 # if applyCalib:
                     
