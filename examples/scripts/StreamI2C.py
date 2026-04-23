@@ -86,7 +86,9 @@ if __name__ == '__main__':
     # Load and assign the LuT
     lut154 = LuT()
     lut154.from_csv('./lut/32x32dL1k7.csv', offset=0)
-   
+    i2c_driver.LuT = lut154
+    
+    
     # Create and set buffer for i2c data
     i2c_buffer = Queue(maxsize=10)
     
