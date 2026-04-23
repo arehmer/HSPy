@@ -97,9 +97,13 @@ if __name__ == '__main__':
     
     # Create simple consumer thread to empty the i2c_buffer and prevent blocking
     class DebugReader(RThread_R1):
+        
+        def __init__(self,**kwargs):
+            super().__init__(**kwargs)
+        
         def _target(self):
             data = self.read_buffer.get()
-            print(data['pix_comp'])
+            print(data['pix_dK'])
             return None
         
     reader_thread = DebugReader(name='reader_thread',

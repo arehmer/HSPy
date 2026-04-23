@@ -20,7 +20,8 @@ class RWThread_R1(Thread):
                  write_buffer:Queue,
                  **kwargs):
 
-        super().__init__(**kwargs)
+        super().__init__(target = self._target,
+                         **kwargs)
         
         self.name = name
         self.read_buffer = read_buffer
@@ -41,7 +42,7 @@ class RWThread_R1(Thread):
                 data_upstream = self.read_buffer.get(timeout=1.0)  # blocks until data arrives
                 
                 # Process data
-                result = self._process(data_upstream)
+                result = self._target(data_upstream)
                 
                 # Put result into downstream buffer
                 self.write_buffer.put(result)
@@ -52,7 +53,7 @@ class RWThread_R1(Thread):
             except Exception as e:
                 print(f"[{self.name}] {e}")                  
             
-    def _process(self,data:dict):
+    def _target(self,data:dict):
         """Override in subclass"""
         raise NotImplementedError
                 
@@ -195,7 +196,8 @@ class WThread_R1(Thread):
                  write_buffer: Queue,
                  **kwargs):
         
-        super().__init__(**kwargs)
+        super().__init__(target = self._target,
+                         **kwargs)
         self.name = name
         self.write_buffer = write_buffer
         self._exit = Event()
@@ -242,7 +244,8 @@ class RThread(Thread):
         self.read_condition = read_condition
         self._exit = False 
         
-        super().__init__(target=target,**kwargs)
+        super().__init__(target=target,
+                         **kwargs)
         
     def run(self):
         
@@ -286,7 +289,8 @@ class RThread_R1(Thread):
                  read_buffer:Queue,
                  **kwargs):
         
-        super().__init__(**kwargs)
+        super().__init__(**kwargs,
+                         target = self._target)
         
         self.name = name
         self.read_buffer = read_buffer
