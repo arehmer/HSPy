@@ -201,7 +201,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._calib: dict = {}
 
         # Threading necessities
-        self.i2c_queue = queue.Queue(maxsize=10)       # bounded to avoid memory buildup
+        self.i2c_queue = queue.Queue(maxsize=1)        # bounded to avoid memory buildup
         self.i2c_stop = threading.Event()              # if event is set, threads are killed
         
         # Rolling stack buffers (depth 8) for stable averaging

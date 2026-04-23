@@ -90,7 +90,7 @@ if __name__ == '__main__':
     
     
     # Create and set buffer for i2c data
-    i2c_buffer = Queue(maxsize=10)
+    i2c_buffer = Queue(maxsize=1)
     
     i2c_driver.output_queue = i2c_buffer
     
