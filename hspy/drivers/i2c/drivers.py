@@ -138,19 +138,8 @@ class I2C_Driver:
 
 # ─────────────────────────────────────────────────────────────────────────────
 class I2C_HTPA32x32dError(Exception):
-    """Raised on I2C communication or data errors."""
-    
-    def __init__(self):
-        
-        self._output_queue = None
-        
+    """Raised on I2C communication or data errors."""    
 
-    @property
-    def output_queue(self,q:queue):
-        return self._output_queue
-    @output_queue.setter
-    def output_queue(self,q:queue):
-        self._output_queue = q
     
 
 # ─────────────────────────────────────────────────────────────────────────────
