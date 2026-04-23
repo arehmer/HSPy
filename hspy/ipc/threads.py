@@ -640,6 +640,7 @@ class EMACounting_Thread(RThread_R1):
     Useful for counting the number of detected objects, e.g. persons, over time.
     """
     def __init__(self,
+                 name : str,
                  read_buffer:Queue,
                  **kwargs):
         
@@ -657,7 +658,8 @@ class EMACounting_Thread(RThread_R1):
         # self.dT_samples = []              # List of samples to estimate dT from
         
         # Call constructor of parent class
-        super(EMACounting_Thread,self).__init__(read_buffer = read_buffer,
+        super(EMACounting_Thread,self).__init__(name = name,
+                                                read_buffer = read_buffer,
                                                 **kwargs)
         
     @property

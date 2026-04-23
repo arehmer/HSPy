@@ -15,16 +15,20 @@ class RWThread_R1(Thread):
     Base class for a thread that reads from one buffer and writes into another
     """
     def __init__(self,
+                 name : str,
                  read_buffer:Queue,
                  write_buffer:Queue,
                  **kwargs):
 
+        super().__init__(**kwargs)
+        
+        self.name = name
         self.read_buffer = read_buffer
         self.write_buffer = write_buffer
         
         self._exit = Event()
 
-        super().__init__(**kwargs)
+        
     
     def run(self):
         
@@ -44,6 +48,9 @@ class RWThread_R1(Thread):
                 
             except queue.Empty:
                 continue
+            
+            except Exception as e:
+                print(f"[self.name] {e}")                
             
     def _process(self,data:dict):
         """Override in subclass"""
@@ -184,10 +191,12 @@ class WThread_R1(Thread):
     """   
     
     def __init__(self,
+                 name : str,
                  write_buffer: Queue,
                  **kwargs):
         
         super().__init__(**kwargs)
+        self.name = name
         self.write_buffer = write_buffer
         self._exit = Event()
         self.daemon = True  # dies automatically if main thread exits
@@ -197,11 +206,19 @@ class WThread_R1(Thread):
         # Check if thread has been stopped
         while not self._exit.is_set():
             
-            # Execute target function
-            result = self._target()
+            try:
+                # Execute target function
+                result = self._target()
+                
+                # Write result to buffer
+                self.write_buffer.put(result)  # blocks naturally if queue is full
+                
+            except queue.Empty:
+                continue
             
-            # Write result to buffer
-            self.write_buffer.put(result)  # blocks naturally if queue is full
+            except Exception as e:
+                print(f"[self.name] {e}")    
+                
             
     def _target(self):
         """Override in subclass to produce data."""
@@ -265,11 +282,13 @@ class RThread_R1(Thread):
     Base class for a thread that reads from a buffer
     """
     def __init__(self,
+                 name : str,
                  read_buffer:Queue,
                  **kwargs):
         
         super().__init__(**kwargs)
         
+        self.name = name
         self.read_buffer = read_buffer
         self._exit = Event()
         self.daemon = True  # dies automatically if main thread exits
@@ -280,11 +299,18 @@ class RThread_R1(Thread):
         
         # Check if thread has been stopped
         while not self._exit.is_set():
-                        
-            # Execute target function
-            result = self._target()
             
-            print(result['Tamb'])
+            try:
+                # Execute target function
+                result = self._target()
+                
+                print(result['Tamb'])
+            
+            except queue.Empty:
+                continue
+            
+            except Exception as e:
+                print(f"[self.name] {e}")       
                        
     def _target(self):
         """Override in subclass to produce data."""
