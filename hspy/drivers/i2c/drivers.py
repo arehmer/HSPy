@@ -351,9 +351,9 @@ class I2C_HTPA32x32d(I2C_Driver):
                     # Calculcate Temperatures from pixel voltages
                     data = self.apply_calib(data)
                     
-                # if calcdK:
+                if calcdK:
                     
-                #     data = self.apply_LuT(data)
+                    data = self.apply_LuT(data)
                 
                 # Set success flag
                 data['success'] = True
@@ -685,10 +685,10 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         return data
     
-    def apply_LuT(self,frame:dict):
+    def apply_LuT(self,data:dict):
         """
         Applies Look-up-Table to compensated pixel voltages stored in
-        frame['pix_comp'] and writes them to frame['pix_dK']
+        data['pix_comp'] and writes them to data['pix_dK']
 
         Parameters
         ----------
@@ -703,14 +703,14 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         # Arrange the comensated pixel voltages and the ambient temperature
         # in a np.ndarray
-        Ud_Ta = np.hstack([frame['pix_comp'].reshape((-1,1)),
-                           np.tile(np.frame['Tamb'],(_PIXELS,1)).reshape((-1,1))])
+        Ud_Ta = np.hstack([data['pix_comp'].reshape((-1,1)),
+                           np.tile(data['Tamb'],(_PIXELS,1)).reshape((-1,1))])
 
         pix_dK = self.LuT.calc_To(Ud_Ta)
         
-        frame['pix_dK'] = pix_dK
+        data['pix_dK'] = pix_dK
         
-        return frame
+        return data
         
         
 
