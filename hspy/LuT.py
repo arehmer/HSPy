@@ -4,12 +4,14 @@ Created on Thu Feb  8 16:11:36 2024
 
 @author: rehmer
 """
-
+from typing import List
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from scipy.interpolate import RegularGridInterpolator
+from warnings import warn
 
 
 
@@ -17,16 +19,40 @@ class LuT:
     
     def __init__(self,**kwargs):
         
+        self._LuT = None                    # Look-up-Table as pd.DataFrame
+        self._LuTGridInterpolator = None    # SciPy Regular Grid Interpolator, generated automatically  
+        
         pass
     
-    def LuT_from_df(self,df):
+    @property
+    def LuT(self):
+        return self._LuT
+    @LuT.setter
+    def LuT(self,lut:pd.DataFrame):
+        if not isinstance(lut,pd.DataFrame):
+            raise TypeError(f'lut is not type {pd.DataFrame} but {type(lut)}.')
+        else:
+            self._LuT = lut
+
+    @property
+    def LuTGridInterpolator(self):
+        return self._LuTGridInterpolator
+    @LuTGridInterpolator.setter
+    def LuTGridInterpolator(self,interpol:RegularGridInterpolator):
+        if not isinstance(interpol,RegularGridInterpolator):
+            raise TypeError(f'interpol is not type {type(RegularGridInterpolator)} but {type(interpol)}.')
+        else:
+            self._LuTGridInterpolator = interpol
+    
+    def from_df(self,df):
         
-        
-        
-        
+        # Set class property        
         self.LuT = df
         
-    def LuT_from_csv(self,csv_path,offset):
+        # Create LuTGridInterpolator for fast bilinear interpolation
+        self._create_LuTGridInterpolator()
+        
+    def from_csv(self,csv_path,offset):
         
         self.offset = offset
         
@@ -39,9 +65,22 @@ class LuT:
         # Subtract offset
         LuT.index = LuT.index - offset
         
+        # Set class property   
         self.LuT = LuT
         
-    def LuT_from_xlsx(self,xlsx_path,sheet_name,**kwargs):
+        # Create LuTGridInterpolator for fast bilinear interpolation
+        self._create_LuTGridInterpolator()
+
+    def from_HTPAxls(self,sheet_name,**kwargs):
+        print('Loading LuT ' + sheet_name + ' ...')
+        xlsx_standard = Path('T:/Projekte/HTPA8x8_16x16_32x31/Datasheet/LookUpTablesHTPA.xlsm')
+        
+        xlsx_path = kwargs.pop('xlsx_path',xlsx_standard)
+        self.from_xlsx(xlsx_path,sheet_name,**kwargs)
+        print(sheet_name + ' successfully loaded.')
+        return None
+        
+    def from_xlsx(self,xlsx_path,sheet_name,**kwargs):
         
         index_col = kwargs.pop('index_col',0)
         usecols = kwargs.pop('usecols','A,D:P')
@@ -65,12 +104,56 @@ class LuT:
         # Rename index
         df.index.name = 'Ud'
         
-        # That's it
+        # Set class property   
         self.LuT = df
+        
+        # Create LuTGridInterpolator for fast bilinear interpolation
+        self._create_LuTGridInterpolator()
         
         return None
     
-    def LuT_to_xlsx(self,xlsx_path):
+    
+    def _create_LuTGridInterpolator(self):
+        """
+        Creates a scipy regular grid interpolator for fast bilinear interpola-
+        tion over the LuT
+        
+        Source https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.RegularGridInterpolator.html#scipy.interpolate.RegularGridInterpolator
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        # Check if property LuT with pd.DataFrame as LuT has been set
+        if self.LuT is None:
+            raise ValueError('No imported LuT found, self.LuT is None.')
+    
+        
+        # Get all Ta values and Ud values from LuT
+        Ta_elements = self.LuT.columns
+        Ud_elements = self.LuT.index.values
+        
+        # Create a 2d grid from Ta_elements and Ud_elements
+        # Ta_grid, Ud_grid = np.meshgrid(Ta_elements,Ud_elements)
+        
+        # Get all To values from the LuT
+        To_elements = self.LuT.values
+        
+        # Make sure the created grids and To_elements have the same shape
+        # if not Ta_grid.shape == Ud_grid.shape == To_elements.shape:
+        #     raise ValueError('Shapes of LuT and created Ta-Ud-grids are not consistent.')
+        
+        # Create RegularGridInterpolator
+        interp = RegularGridInterpolator((Ud_elements,Ta_elements),
+                                         To_elements)
+        
+        # Assign to class property
+        self.LuTGridInterpolator = interp
+    
+    
+    def to_xlsx(self,xlsx_path):
         
         # Load LuT
         LuT = self.LuT.copy()
@@ -155,14 +238,7 @@ class LuT:
         
         writer.close()
             
-    def LuT_from_HTPAxls(self,sheet_name,**kwargs):
-        print('Loading LuT ' + sheet_name + ' ...')
-        xlsx_standard = Path('T:/Projekte/HTPA8x8_16x16_32x31/Datasheet/LookUpTablesHTPA.xlsm')
-        
-        xlsx_path = kwargs.pop('xlsx_path',xlsx_standard)
-        self.LuT_from_xlsx(xlsx_path,sheet_name,**kwargs)
-        print(sheet_name + ' successfully loaded.')
-        return None
+
         
     def inverse_eval_LuT(self,data:pd.DataFrame,
                          Ta:str='Tamb0',
@@ -266,6 +342,10 @@ class LuT:
             DESCRIPTION.
 
         """
+        
+        DeprecationWarning('This function will be superseded by calc_To() ' +\
+                           'in the future.')
+        
         LuT = self.LuT
         
         # Convert measurements in Kelvin to dK
@@ -276,7 +356,7 @@ class LuT:
             Ta_meas = data.loc[meas,Ta_col]
             Ud = data.loc[meas,Ud_col]
         
-            # Find columns and indeces for bilinear interpolation
+            # Find columns and indices for bilinear interpolation
             col_idx = LuT.columns < Ta_meas
             
             # Check if Ta_meas is outside of the range of the LuT
@@ -310,7 +390,108 @@ class LuT:
                         
         return data
         
+    def calc_To(self,
+                qpoints: tuple | np.ndarray | pd.Series | pd.DataFrame ) -> List[float]:
+        """
+        Determines To for a given pair of (Ud,Tamb0). Ud must be given in Digits,
+        Ta must be given in dK.
         
+
+        Parameters
+        ----------
+        qpoints : tuple | pd.DataFrame
+            DESCRIPTION.
+
+        Returns
+        -------
+        List[float]
+            DESCRIPTION.
+
+        """
+        
+        # ---------- Query Point is given as a tuple --------------------------
+        if isinstance(qpoints,tuple) | isinstance(qpoints,np.ndarray):
+            return self._calc_To(qpoints)
+        
+        # ---------- Query Points are given as a np.ndarray -------------------
+        if isinstance(qpoints,np.ndarray):
+            return self._calc_To(qpoints)
+        
+        # ------------ Query Points are given as pd.Series --------------------
+        if isinstance(qpoints,pd.Series):
+            
+            # Check if index names associated with Ud and Tamb do exist
+            if not 'Ud' in qpoints.index:
+                raise ValueError(f"Index 'Ud' not in {qpoints}")
+            if not 'Tamb0' in qpoints.index:
+                raise ValueError(f"Index 'Tamb0' not in {qpoints}")
+            
+            return self._calc_To( (qpoints['Ud'],qpoints['Tamb']) )
+        
+        # --------- Query Points are given as pd.DataFrame --------------------
+        if isinstance(qpoints,pd.DataFrame):
+            
+            # Check if index names associated with Ud and Tamb do exist
+            if not 'Ud' in qpoints.columns:
+                raise ValueError(f"Index 'Ud' not in {qpoints.columns}")
+            if not 'Tamb0' in qpoints.columns:
+                raise ValueError(f"Index 'Tamb0' not in {qpoints.columns}")
+            
+            return self._calc_To( qpoints[['Ud','Tamb0']].values)
+                       
+            
+    def _calc_To(self,
+                 qpoints : tuple | np.ndarray) -> tuple | np.ndarray:
+        """
+        Low-level helper of user interface method calc_To
+        """
+        
+        # ---------- Query Point is given as a tuple --------------------------
+        if isinstance(qpoints,tuple):
+            Ud = qpoints[0]
+            Ta = qpoints[1]
+            
+            try:
+                To = self.LuTGridInterpolator((Ud,Ta))
+                
+                
+            except ValueError:
+                
+                if not self.LuT.index.values.min() <= Ud <= self.LuT.index.values.max():
+                    warn('Queried Ud value is out of bounds. To=-1 returned.\n')
+                    To = -1
+
+                if not self.LuT.columns[0] <= Ta <= self.LuT.columns[-1]:
+                    warn('Queried Tamb0 value is out of bounds, To=-2 returned.\n')
+                    To = -2
+                    
+            return To
+        
+        
+        # ---------- Query Points are given as a np.ndarray -------------------
+        if isinstance(qpoints,np.ndarray):
+            
+            n_cols = qpoints.shape[1]
+            
+            if n_cols !=2:
+                raise ValueError('shape mismatch: qpoints must have shape ' +\
+                                 '[(Ud_0,Tamb0_0),..., (Ud_N,Tamb0_N)] with ' +\
+                                     'N: number of query points.')
+                    
+            try:
+                # Try to evaluate whole array in one go
+                To = self.LuTGridInterpolator(qpoints)
+            
+            except ValueError:
+                # If only one query point is out of bounds, a ValueError is 
+                 # returned. In that case, try to evalute point by point
+                To = []
+                for qpoint in qpoints:
+                    To.append(self._calc_To(tuple(qpoint)))
+            
+            return To
+        
+
     def _get_To(self,points,Ta_meas,Ud_meas):
         
         x0 = points.columns[0]

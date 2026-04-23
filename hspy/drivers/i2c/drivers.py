@@ -25,6 +25,8 @@ import smbus2
 import threading
 import queue
 import numpy as np
+
+from hspy.LuT import LuT
 # ---------------------------------------------------------------------------
 # Attempt to import smbus2; fall back to a stub so the module can be imported
 # on non-Linux hosts for testing / offline use.
@@ -213,6 +215,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         # Initialize the sensor
         self.init()
         
+    
     def __enter__(self) -> "I2C_HTPA32x32d":
         self.open()
         return self
@@ -220,8 +223,19 @@ class I2C_HTPA32x32d(I2C_Driver):
     def __exit__(self, *_) -> None:
         self.close()
 
+    # --- class properties -----------------------------------------------------
+    @property
+    def LuT(self):
+        return self._LuT
+    @LuT.setter
+    def LuT(self,lut:LuT):
+        
+        if not isinstance(lut,LuT):
+            raise TypeError(f'LuT object is not type {type(LuT)} but {type(lut)}.')
+        else:
+            self._LuT = lut
+    
     # ── Bus open / close ─────────────────────────────────────────────────────
-
     def open(self) -> None:
         """Open the I2C bus file descriptor."""
         self._bus = SMBus(self._bus_num)
@@ -318,7 +332,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             self.i2c_queue.put(data_dict)                                           # put in queue, blocks if full (backpressure)
 
             
-    def _processing_thread(self,applyCalib:bool=True):
+    def _processing_thread(self,applyCalib:bool=True,calcdK:bool=True):
         """
         Threadable function for converting raw i2c data into the appropriate 
         format (sorting, rearranging, conversion)
@@ -329,16 +343,22 @@ class I2C_HTPA32x32d(I2C_Driver):
         while not self.i2c_stop.is_set():
       
             try:
-                raw_data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
-                proc_data = self.convert_i2c_data(raw_data)            # convert raw i2c data in place
+                data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
+                data = self.convert_i2c_data(data)            # convert raw i2c data in place
                 
                 if applyCalib:
                     
                     # Calculcate Temperatures from pixel voltages
-                    temp_data = self.apply_calib(proc_data)
+                    data = self.apply_calib(data)
+                    
+                if calcdK:
+                    
+                    data = self.apply_LuT(data)
                 
-                temp_data['success'] = True
-                self.output_queue.put(temp_data)
+                # Set success flag
+                data['success'] = True#
+                
+                self.output_queue.put(data)
                     
             except queue.Empty:
                 continue                                          # no data yet, loop and check stop_event
@@ -396,7 +416,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         Returns
         -------
         dict with keys:
-          "pixels"     - list[1024] raw ADC digits (uint16)
+          "pix"     - list[1024] raw ADC digits (uint16)
           "el_offsets" - list[256]  electrical offset digits (uint16)
           "ptat_av"    - PTAT average from the stack (float)
           "vdd_av"     - VDD average from the stack  (float or None)
@@ -461,13 +481,13 @@ class I2C_HTPA32x32d(I2C_Driver):
         # ------ Return -------------------------------------------------------
         if measure_vdd:
             return {
-                "pixels":     pixels,
+                "pix":     pixels,
                 "vdd":        vdd,
                 "t":          time.time()
             }
         else:
             return {
-                "pixels":     pixels,
+                "pix":     pixels,
                 "ptat":       ptat,
                 "t":          time.time()
             }
@@ -483,11 +503,11 @@ class I2C_HTPA32x32d(I2C_Driver):
         vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                     # zero array for storing rearranged ptat data 
 
         
-        if 'pixels' in raw_data.keys():
+        if 'pix' in raw_data.keys():
             
             for block in range(4):
-                    top = raw_data['pixels'][block]['top']      # block data from top half
-                    bot = raw_data['pixels'][block]['bot']      # block data from bottom half
+                    top = raw_data['pix'][block]['top']      # block data from top half
+                    bot = raw_data['pix'][block]['bot']      # block data from bottom half
                     
                     # Rearrange top and bottom half according to page 11
                     top = np.array(top).reshape((n_blocks,_COLS))
@@ -529,8 +549,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         data = {}
         
-        if 'pixels' in raw_data.keys():
-            data['pixels'] = pix_array.flatten()
+        if 'pix' in raw_data.keys():
+            data['pix'] = pix_array.flatten()
             
         if 'eloff' in raw_data.keys():
             data['eloff'] = eloff_array.flatten()
@@ -609,7 +629,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         data['V_ThComp'] = V_ThComp         # store for debugging
         
-        V_comp = data['pixels'] - V_ThComp  # apply compensation
+        V_comp = data['pix'] - V_ThComp  # apply compensation
               
         # ------------- 12.3 Electrical Offset --------------------------------
         V_ElComp = data['eloff']
@@ -658,12 +678,41 @@ class I2C_HTPA32x32d(I2C_Driver):
             
         data['scale'] = PCSCELEVAL / PixCij   # store for debugging       
             
-        data['pixels_comp'] = V_comp * PCSCELEVAL / PixCij
+        data['pix_comp'] = V_comp * PCSCELEVAL / PixCij
         
         # ── Step 6: Replace dead pixels with neighbour average ────────────
         # self._apply_pixel_masking(results, c)
 
         return data
+    
+    def apply_LuT(self,frame:dict):
+        """
+        Applies Look-up-Table to compensated pixel voltages stored in
+        frame['pix_comp'] and writes them to frame['pix_dK']
+
+        Parameters
+        ----------
+        frame : dict
+            DESCRIPTION.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        # Arrange the comensated pixel voltages and the ambient temperature
+        # in a np.ndarray
+        Ud_Ta = np.hstack([frame['pix_comp'].reshape((-1,1)),
+                           np.tile(np.frame['Tamb'],(_PIXELS,1)).reshape((-1,1))])
+
+        pix_dK = self.LuT.calc_To(Ud_Ta)
+        
+        frame['pix_dK'] = pix_dK
+        
+        return frame
+        
+        
 
     def get_ambient_temperature(self, frame: dict) -> float:
         """
