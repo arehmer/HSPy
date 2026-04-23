@@ -103,7 +103,7 @@ if __name__ == '__main__':
         
         def _target(self):
             data = self.read_buffer.get()
-            print(data['pix_comp'])
+            print(data['pix_dK'])
             return None
         
     reader_thread = DebugReader(name='reader_thread',
