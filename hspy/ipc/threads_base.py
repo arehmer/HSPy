@@ -56,6 +56,9 @@ class RWThread_R1(Thread):
     def _target(self,data:dict):
         """Override in subclass"""
         raise NotImplementedError
+        
+    def stop(self):
+        self._exit.set()
                 
 
 class RWThread(Thread):
