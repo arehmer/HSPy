@@ -194,7 +194,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._bus_num    = bus
         self._addr       = i2c_addr
         self._eep_addr   = eeprom_addr
-        self._timeout_ms = timeout_ms
         self._bus: Optional[SMBus] = None
 
         # Calibration constants (populated by load_calibration / init)
@@ -311,6 +310,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         self._calib["F_CLK"] = F_CLK
         self._calib["t_fr4"] = t_fr4
+        self._timeout_ms = t_fr4 / 1e3
 
     def sleep(self) -> None:
         """Put sensor into sleep state (~9 µA standby current)."""
@@ -342,10 +342,13 @@ class I2C_HTPA32x32d(I2C_Driver):
         format (sorting, rearranging, conversion)
         """
         
-        timeout = self._calib['t_fr4'] * 4 / 1e3 * 1.1                 # ms, timeout is frame conversion time + 10 %
+        timeout = self._calib['t_fr4'] * 4 / 1e3 * 1.1                 # ms, timeout is frame conversion time + 10 %, if no item is in the queue until then, something is wrong
         
         while not self.i2c_stop.is_set():
-      
+            
+            if self._image_counter == 2:
+                self.stop_i2cstream()
+            
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
                 # data = self.convert_i2c_data(data)            # convert raw i2c data in place
