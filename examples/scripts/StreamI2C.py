@@ -47,6 +47,7 @@ from hspytools.tparray import TPArray
 from hspytools.ipc.threads import UDP,Imshow
 from hspytools.ipc.threads_base import RThread_R1
 from hspy.drivers.i2c import I2C_HTPA32x32d
+from hspy.LuT import LuT
 
 # from hspytools.ipc.threads import UDP, Record_Thread, FileWriter_Thread
 
@@ -78,9 +79,13 @@ bus = args.bus
 # %% Main loop
 if __name__ == '__main__':
     
-    # # %% Create instance of i2c driver
+    # %% Create instance of i2c driver
     i2c_driver = I2C_HTPA32x32d(bus)
     i2c_driver.init()
+   
+    # Load and assign the LuT
+    lut154 = LuT()
+    lut154.from_csv('./lut/32x32dL1k7.csv', offset=0)
    
     # Create and set buffer for i2c data
     i2c_buffer = Queue(maxsize=10)
