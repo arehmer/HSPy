@@ -324,6 +324,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             data_dict = self.read_frame(active_vdd)                       # read pixels, ptat, vdd
             data_dict.update(self.read_electrical_offsets(blind_vdd))     # read electrical offsets
             
+            print(data_dict.keys())
+            print(data_dict['eloff'])
             self.i2c_queue.put(data_dict)                                 # put in queue, blocks if full (backpressure)
 
             # Increment counter
