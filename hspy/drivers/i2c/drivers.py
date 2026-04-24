@@ -319,11 +319,17 @@ class I2C_HTPA32x32d(I2C_Driver):
                
         while not self.i2c_stop.is_set():
             
+            if self._image_counter == 2:
+                self.stop_i2cstream()
+            
+            
             data_dict = self.read_frame(measure_vdd = True)                         # read pixels, ptat, vdd
             data_dict.update(self.read_electrical_offsets(measure_vdd = False))     # read electrical offsets
             
             self.i2c_queue.put(data_dict)                                           # put in queue, blocks if full (backpressure)
 
+            # Increment counter
+            self._image_counter += 1
             
     def _processing_thread(self,applyCalib:bool=True,calcdK:bool=True):
         """
@@ -334,9 +340,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         timeout = self._calib['t_fr4'] * 4 / 1e3 * 1.1                 # ms, timeout is frame conversion time + 10 %, if no item is in the queue until then, something is wrong
         
         while not self.i2c_stop.is_set():
-            
-            if self._image_counter == 2:
-                self.stop_i2cstream()
             
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
@@ -356,10 +359,7 @@ class I2C_HTPA32x32d(I2C_Driver):
                 
                 # Add a image counter
                 data['image_id'] = self._image_counter
-                
-                # Increment counter
-                self._image_counter += 1
-                
+                                
                 self.output_queue.put(data)
                     
             except queue.Empty:
