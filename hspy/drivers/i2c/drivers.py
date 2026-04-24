@@ -428,7 +428,7 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         # --- Read in raw bytes of top and lower half from all four blocks ---
         
-        raw_bytes: dict[str, list[bytes]] =  {'top': [] , 'bot': [] }
+        raw_bytes: dict[str, i2c_msg] =  {'top': [] , 'bot': [] }
         for block in range(4):
             
             raw_bytes[block] = {}
@@ -473,8 +473,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             top_raw = raw_bytes[block]['top']
             bot_raw = raw_bytes[block]['bot']
             
-            top_int = [(top_raw[i] << 8) | top_raw[i + 1] for i in range(0, 258, 2)]
-            bot_int = [(bot_raw[i] << 8) | bot_raw[i + 1] for i in range(0, 258, 2)]
+            top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
+            bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
         
         
             # Word[0] = PTAT (or VDD if VDD_MEAS set)
