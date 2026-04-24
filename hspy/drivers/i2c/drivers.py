@@ -360,11 +360,12 @@ class I2C_HTPA32x32d(I2C_Driver):
                 print(data['eloff']['bot'].shape)
                 print(data['eloff']['bot'].shape)
                 
-                print(type(data['vdd']['bot']))
-                print(type(data['vdd']['bot']))
+                print(data['vdd']['bot'].shape)
+                print(data['vdd']['bot'].shape)
                 
-                print(type(data['ptat']['bot']))
-                print(type(data['ptat']['bot']))
+                print(data['ptat']['bot'].shape)
+                print(data['ptat']['bot'].shape)
+                
                 
                 # print(data.keys())
                 # print(data)
@@ -407,16 +408,19 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         
         # ------------- Convert raw bytes into pairs of integers -------------
-        pixels: dict[int, dict[str, list[int]]] = \
-            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
+        pixels: dict[int, dict[str, np.ndarray]] = \
+            {b: {'top': np.zeros((_BLOCK_PX,)),
+                 'bot': np.zeros((_BLOCK_PX,))} \
              for b in range(4)}
                 
-        eloff: dict[str, list[int]] = {'top': [0] * _BLOCK_PX, 
-                                       'bot': [0] * _BLOCK_PX}
+        eloff: dict[str, np.ndarray] = {'top': np.zeros((_BLOCK_PX,)), 
+                                       'bot': np.zeros((_BLOCK_PX,))}
                                         
-        ptat: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+        ptat: dict[str, list[int]] =  {'top': [] , 
+                                        'bot': [] }
 
-        vdd: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+        vdd: dict[str, list[int]] =  {'top': [] ,
+                                       'bot': [] }
         
         # ------------- Convert pixels and vdd/ptat ---------------------------
         
@@ -456,11 +460,11 @@ class I2C_HTPA32x32d(I2C_Driver):
             ptat['bot'] = [bot_int[0]]
         
         # ------ Average PTAT and VDD -------------------------------------------
-        vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
-        vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
+        vdd['top'] = np.array(vdd['top']).mean().flatten()
+        vdd['bot'] = np.array(vdd['bot']).mean().flatten()
         
-        ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
-        ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
+        ptat['top'] = np.array(ptat['top']).mean().flatten()
+        ptat['bot'] = np.array(ptat['bot']).mean().flatten()
         
         return {'pix'   : pixels,
                 'eloff' : eloff,
