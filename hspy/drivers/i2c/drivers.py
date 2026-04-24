@@ -346,31 +346,10 @@ class I2C_HTPA32x32d(I2C_Driver):
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
                 
-                # print(data.keys())
-                # print(data['pix'].keys())
-                # print(data['eloff'].keys())
-                
                 data = self._raw_bytes_to_int(data,
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
-                
-                print(data['pix'][0]['top'].shape)
-                print(data['pix'][0]['bot'].shape)
-                
-                print(data['eloff']['bot'].shape)
-                print(data['eloff']['bot'].shape)
-                
-                print(data['vdd']['bot'].shape)
-                print(data['vdd']['bot'].shape)
-                
-                print(data['ptat']['bot'].shape)
-                print(data['ptat']['bot'].shape)
-                
-                
-                # print(data.keys())
-                # print(data)
-                
-                
+
                 data = self.convert_i2c_data(data)                 # convert raw i2c data int
                 
                 # if applyCalib:
@@ -652,8 +631,8 @@ class I2C_HTPA32x32d(I2C_Driver):
                     bot = raw_data['pix'][block]['bot']      # block data from bottom half
                     
                     # Rearrange top and bottom half according to page 11
-                    top = np.array(top).reshape((n_blocks,_COLS))
-                    bot = np.flipud(np.array(bot).reshape((n_blocks,_COLS)))
+                    top = top.reshape((n_blocks,_COLS))
+                    bot = np.flipud(bot.reshape((n_blocks,_COLS)))
                     
                     pix_array[block*n_blocks:(block+1)*n_blocks,:] = top
                     
@@ -685,7 +664,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             top = raw_data['eloff']['top']      # block data from top half
             bot = raw_data['eloff']['bot']      # block data from bottom half
             
-            topbot = top + bot
+            topbot = list(np.vstack(top,bot))
             
             eloff_array = self._sort_perBlock_calibData(topbot)
         
@@ -971,6 +950,9 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._calib = c
         
     def _sort_perBlock_calibData(self,block_data:list) -> np.ndarray:
+        
+        if not isinstance(block_data, list):
+            raise TypeError(f'block_data is type {type(block_data)} instead of list.')
         
         # Check input size 
         expected_len = _PIXELS / _BLOCKS_
