@@ -345,7 +345,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
-                
+                print(data)
                 # data = self._raw_bytes_to_int(data,
                 #                               active_vdd,
                 #                               blind_vdd)           # convert raw bytes to int
@@ -378,9 +378,9 @@ class I2C_HTPA32x32d(I2C_Driver):
                 print(f"[processing_thread] {e}")                
     
     def convert_i2c_data(self,
-                          raw_bytes:dict, 
-                          active_vdd:bool,
-                          blind_vdd:bool):
+                         raw_bytes:dict, 
+                         active_vdd:bool,
+                         blind_vdd:bool):
         
         # Code is written such, that it requires active_vdd and blind_vdd
         # to be different:
@@ -402,8 +402,6 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         vdd: dict[str, list[int]] =  {'top': [] ,
                                        'bot': [] }
-        
-        print(raw_bytes)
         
         # ------------- Convert pixels and vdd/ptat ---------------------------
         
@@ -444,6 +442,14 @@ class I2C_HTPA32x32d(I2C_Driver):
         top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
         bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
         
+        if blind_vdd:
+            vdd['top'].append(top_int[0])
+            vdd['bot'].append(bot_int[0])
+        else:
+            ptat['top'].append(top_int[0])
+            ptat['bot'].append(bot_int[0])
+            
+                
         eloff_top = top_int[1::]
         eloff_bot = bot_int[1::]
         
@@ -451,13 +457,11 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         eloff_array = self._sort_perBlock_calibData(topbot)
         
-        if blind_vdd:
-            vdd_array[0] = np.array(vdd['top']).mean().flatten()[0]
-            vdd_array[1] = np.array(vdd['bot']).mean().flatten()[0]
+        vdd_array[0] = np.array(vdd['top']).mean().flatten()[0]
+        vdd_array[1] = np.array(vdd['bot']).mean().flatten()[0]
 
-        else:
-            ptat_array[0] = np.array(ptat['top']).mean().flatten()[0]
-            ptat_array[1] = np.array(ptat['bot']).mean().flatten()[0]
+        ptat_array[0] = np.array(ptat['top']).mean().flatten()[0]
+        ptat_array[1] = np.array(ptat['bot']).mean().flatten()[0]
                 
         return {'pix'   : pix_array.flatten(),
                 'eloff' : eloff_array.flatten(),
