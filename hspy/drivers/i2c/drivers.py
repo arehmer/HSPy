@@ -423,19 +423,15 @@ class I2C_HTPA32x32d(I2C_Driver):
           "ptat_av"    - PTAT average from the stack (float)
           "vdd_av"     - VDD average from the stack  (float or None)
           "time"       - time.time() at function return
-        """
-        pixels: dict[int, dict[str, list[int]]] = \
-            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
-             for b in range(4)}
-                                        
-        ptat: dict[str, list[int]] =  {'top': [] , 'bot': [] }
-
-        vdd: dict[str, list[int]] =  {'top': [] , 'bot': [] }
-        
+        """        
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
-        # ── Read four blocks ──────────────────────────────────────────────
+        # --- Read in raw bytes of top and lower half from all four blocks ---
+        
+        raw_bytes: dict[str, list[bytes]] =  {'top': [] , 'bot': [] }
         for block in range(4):
+            
+            raw_bytes[block] : {}
             
             # Write to configuration register:
             # ------------------------------------------------------
@@ -461,17 +457,37 @@ class I2C_HTPA32x32d(I2C_Driver):
             top = self._read_half(_CMD_READ_TOP)  # 129 words
             bot = self._read_half(_CMD_READ_BOT)  # 129 words
             
+            raw_bytes[block]['top'] = top
+            raw_bytes[block]['bot'] = bot
+            
+        # ------------- Convert raw bytes into pairs of integers -------------
+        pixels: dict[int, dict[str, list[int]]] = \
+            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
+             for b in range(4)}
+                                        
+        ptat: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+
+        vdd: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+        
+        for block in range(4):
+            top_raw = raw_bytes[block]['top']
+            bot_raw = raw_bytes[block]['bot']
+            
+            top_int = [(top_raw[i] << 8) | top_raw[i + 1] for i in range(0, 258, 2)]
+            bot_int = [(bot_raw[i] << 8) | bot_raw[i + 1] for i in range(0, 258, 2)]
+        
+        
             # Word[0] = PTAT (or VDD if VDD_MEAS set)
             if measure_vdd:
-                vdd['top'].append(top[0])
-                vdd['bot'].append(bot[0])
+                vdd['top'].append(top_int[0])
+                vdd['bot'].append(bot_int[0])
             else:
-                ptat['top'].append(top[0])
-                ptat['bot'].append(bot[0])
+                ptat['top'].append(top_int[0])
+                ptat['bot'].append(bot_int[0])
             
-            pixels[block]['top'] = top[1::]
-            pixels[block]['bot'] = bot[1::]
-            
+            pixels[block]['top'] = top_int[1::]
+            pixels[block]['bot'] = bot_int[1::]
+                
         # ------ Average PTAT / VDD -------------------------------------------
         if measure_vdd:
             vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
@@ -996,8 +1012,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         list[129]:  index 0 = PTAT (or VDD),  index 1..128 = pixel data
         """
         raw   = self._read_bytes(cmd, 258)
-        words = [(raw[i] << 8) | raw[i + 1] for i in range(0, 258, 2)]
-        return words
+        # words = [(raw[i] << 8) | raw[i + 1] for i in range(0, 258, 2)]
+        return raw
 
     def _wait_eoc(self) -> None:
         """Poll the status register until EOC is set or the timeout expires."""
