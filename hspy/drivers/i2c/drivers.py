@@ -319,10 +319,6 @@ class I2C_HTPA32x32d(I2C_Driver):
                
         while not self.i2c_stop.is_set():
             
-            if self._image_counter == 2:
-                self.stop_i2cstream()
-            
-            
             data_dict = self.read_frame(measure_vdd = True)                         # read pixels, ptat, vdd
             data_dict.update(self.read_electrical_offsets(measure_vdd = False))     # read electrical offsets
             
@@ -454,11 +450,11 @@ class I2C_HTPA32x32d(I2C_Driver):
             self._wait_eoc()
 
             # Read frame from register
-            top = self._read_half(_CMD_READ_TOP)  # 129 words
-            bot = self._read_half(_CMD_READ_BOT)  # 129 words
+            top_raw = self._read_half(_CMD_READ_TOP)  # 129 words
+            bot_raw = self._read_half(_CMD_READ_BOT)  # 129 words
             
-            raw_bytes[block]['top'] = top
-            raw_bytes[block]['bot'] = bot
+            raw_bytes[block]['top'] = top_raw
+            raw_bytes[block]['bot'] = bot_raw
             
         # ------------- Convert raw bytes into pairs of integers -------------
         pixels: dict[int, dict[str, list[int]]] = \
@@ -1055,18 +1051,21 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._wait_eoc()
         
         # Read frame from register
-        top = self._read_half(_CMD_READ_TOP)  # 129 words
-        bot = self._read_half(_CMD_READ_BOT)  # 129 words
+        top_raw = self._read_half(_CMD_READ_TOP)  # 258 bytes
+        bot_raw = self._read_half(_CMD_READ_BOT)  # 258 bytes
+        
+        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 bytes
+        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 bytes
         
         if measure_vdd:
-            vdd['top'] = [top[0]]
-            vdd['bot'] = [bot[0]]
+            vdd['top'] = [top_int[0]]
+            vdd['bot'] = [bot_int[0]]
         else:
-            ptat['top'] = [top[0]]
-            ptat['bot'] = [bot[0]]
+            ptat['top'] = [top_int[0]]
+            ptat['bot'] = [bot_int[0]]
         
-        eloff['top'] = top[1::]
-        eloff['bot'] = bot[1::]
+        eloff['top'] = top_int[1::]
+        eloff['bot'] = bot_int[1::]
         
         if measure_vdd:
             return {
