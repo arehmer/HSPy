@@ -325,7 +325,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             data_dict.update(self.read_electrical_offsets(blind_vdd))     # read electrical offsets
             
             print(data_dict.keys())
-            print(data_dict['eloff'])
+            print(len(data_dict['eloff']['top']))
+            print(len(data_dict['eloff']['bot']))
             self.i2c_queue.put(data_dict)                                 # put in queue, blocks if full (backpressure)
 
             # Increment counter
@@ -422,8 +423,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         top_raw = raw_bytes['eloff']['top']
         bot_raw = raw_bytes['eloff']['bot']
         
-        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
-        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
+        # top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
+        # bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
         
         # eloff['top'] = top_int[1::]
         # eloff['bot'] = bot_int[1::]
