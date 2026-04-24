@@ -324,9 +324,6 @@ class I2C_HTPA32x32d(I2C_Driver):
             data_dict = self.read_frame(active_vdd)                       # read pixels, ptat, vdd
             data_dict.update(self.read_electrical_offsets(blind_vdd))     # read electrical offsets
             
-            print(data_dict.keys())
-            print(len(data_dict['eloff']['top']))
-            print(len(data_dict['eloff']['bot']))
             self.i2c_queue.put(data_dict)                                 # put in queue, blocks if full (backpressure)
 
             # Increment counter
@@ -348,6 +345,11 @@ class I2C_HTPA32x32d(I2C_Driver):
             
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
+                
+                print(data.keys())
+                print(data['pix'].keys())
+                print(data['eloff'].keys())
+                
                 data = self._raw_bytes_to_int(data,
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
@@ -416,8 +418,8 @@ class I2C_HTPA32x32d(I2C_Driver):
                 ptat['top'].append(top_int[0])
                 ptat['bot'].append(bot_int[0])
             
-            pixels[block]['top'] = top_int[1::]
-            pixels[block]['bot'] = bot_int[1::]
+            # pixels[block]['top'] = top_int[1::]
+            # pixels[block]['bot'] = bot_int[1::]
                
         # ----------- Convert electrical offsets and vdd/ptat -----------------
         # top_raw = raw_bytes['eloff']['top']
