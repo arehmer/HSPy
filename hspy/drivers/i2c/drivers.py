@@ -431,7 +431,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         raw_bytes: dict[str, list[bytes]] =  {'top': [] , 'bot': [] }
         for block in range(4):
             
-            raw_bytes[block] : {}
+            raw_bytes[block] = {}
             
             # Write to configuration register:
             # ------------------------------------------------------
