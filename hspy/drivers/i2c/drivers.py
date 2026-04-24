@@ -664,7 +664,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             top = raw_data['eloff']['top']      # block data from top half
             bot = raw_data['eloff']['bot']      # block data from bottom half
             
-            topbot = list(np.vstack([top,bot]))
+            topbot = list(np.hstack([top,bot]))
             
             eloff_array = self._sort_perBlock_calibData(topbot)
         
