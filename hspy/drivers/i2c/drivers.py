@@ -345,9 +345,9 @@ class I2C_HTPA32x32d(I2C_Driver):
             
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
-                # data = self._raw_bytes_to_int(data,
-                #                               active_vdd,
-                #                               blind_vdd)           # convert raw bytes to int
+                data = self._raw_bytes_to_int(data,
+                                              active_vdd,
+                                              blind_vdd)           # convert raw bytes to int
                 # data = self.convert_i2c_data(data)                 # convert raw i2c data int
                 
                 # if applyCalib:
@@ -373,7 +373,10 @@ class I2C_HTPA32x32d(I2C_Driver):
             except Exception as e:
                 print(f"[processing_thread] {e}")                
     
-    def _raw_bytes_to_int(self,raw_bytes:dict, active_vdd:bool, blind_vdd:bool):
+    def _raw_bytes_to_int(self,
+                          raw_bytes:dict, 
+                          active_vdd:bool,
+                          blind_vdd:bool):
         
         # Code is written such, that it requires active_vdd and blind_vdd
         # to be different:
@@ -413,22 +416,22 @@ class I2C_HTPA32x32d(I2C_Driver):
             pixels[block]['top'] = top_int[1::]
             pixels[block]['bot'] = bot_int[1::]
                
-        # ----------- Convert electrical offsets and vdd/ptat -----------------
-        top_raw = raw_bytes['eloff']['top']
-        bot_raw = raw_bytes['eloff']['bot']
+        # # ----------- Convert electrical offsets and vdd/ptat -----------------
+        # top_raw = raw_bytes['eloff']['top']
+        # bot_raw = raw_bytes['eloff']['bot']
         
-        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
-        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
+        # top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
+        # bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
         
-        eloff['top'] = top_int[1::]
-        eloff['bot'] = bot_int[1::]
+        # eloff['top'] = top_int[1::]
+        # eloff['bot'] = bot_int[1::]
         
-        if blind_vdd:
-            vdd['top'] = [top_int[0]]
-            vdd['bot'] = [bot_int[0]]
-        else:
-            ptat['top'] = [top_int[0]]
-            ptat['bot'] = [bot_int[0]]
+        # if blind_vdd:
+        #     vdd['top'] = [top_int[0]]
+        #     vdd['bot'] = [bot_int[0]]
+        # else:
+        #     ptat['top'] = [top_int[0]]
+        #     ptat['bot'] = [bot_int[0]]
         
         # ------ Average PTAT and VDD -------------------------------------------
         # vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
