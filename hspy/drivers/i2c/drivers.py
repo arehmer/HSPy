@@ -350,7 +350,9 @@ class I2C_HTPA32x32d(I2C_Driver):
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
 
-                data = self.convert_i2c_data(data)                 # convert raw i2c data int
+                data = self.convert_i2c_data(data,
+                                             active_vdd,
+                                             blind_vdd)                 # convert raw i2c data int
                 
                 if applyCalib:
                     
@@ -375,7 +377,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             except Exception as e:
                 print(f"[processing_thread] {e}")                
     
-    def _raw_bytes_to_int(self,
+    def convert_i2c_data(self,
                           raw_bytes:dict, 
                           active_vdd:bool,
                           blind_vdd:bool):
@@ -386,15 +388,15 @@ class I2C_HTPA32x32d(I2C_Driver):
             raise ValueError('active_vdd and blind_vdd must not be equal!')
         
         
-        # ------------- Convert raw bytes into pairs of integers -------------
-        pixels: dict[int, dict[str, np.ndarray]] = \
-            {b: {'top': np.zeros((_BLOCK_PX,)),
-                 'bot': np.zeros((_BLOCK_PX,))} \
-             for b in range(4)}
-                
-        eloff: dict[str, np.ndarray] = {'top': np.zeros((_BLOCK_PX,)), 
-                                       'bot': np.zeros((_BLOCK_PX,))}
-                                        
+        n_blocks = int(_PIXELS / 2 / _BLOCK_PX)
+        n_ptat = 2
+        n_vdd = 2
+        
+        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)                # zero array for storing rearranged pixel data 
+        ptat_array = np.zeros((n_ptat,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
+        vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                     # zero array for storing rearranged ptat data 
+
+                                       
         ptat: dict[str, list[int]] =  {'top': [] , 
                                         'bot': [] }
 
@@ -418,8 +420,20 @@ class I2C_HTPA32x32d(I2C_Driver):
                 ptat['top'].append(top_int[0])
                 ptat['bot'].append(bot_int[0])
             
-            pixels[block]['top'] = top_int[1::]
-            pixels[block]['bot'] = bot_int[1::]
+            pixels_top = top_int[1::]
+            pixels_bot = bot_int[1::]
+            
+            # Rearrange top and bottom half according to page 11
+            pixels_top = pixels_top.reshape((n_blocks,_COLS))
+            pixels_bot = np.flipud(pixels_bot.reshape((n_blocks,_COLS)))
+            
+            # Parse top and bottom half pixels to pix_array
+            pix_array[block*n_blocks:(block+1)*n_blocks,:] = pixels_top
+            
+            if block == 0:
+                pix_array[(-block-1)*n_blocks::,:] = pixels_bot
+            else:
+                pix_array[(-block-1)*n_blocks:-block*n_blocks,:] = pixels_bot
                
         # ----------- Convert electrical offsets and vdd/ptat -----------------
         top_raw = raw_bytes['eloff']['top']
@@ -428,27 +442,25 @@ class I2C_HTPA32x32d(I2C_Driver):
         top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
         bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
         
-        eloff['top'] = top_int[1::]
-        eloff['bot'] = bot_int[1::]
+        eloff_top = top_int[1::]
+        eloff_bot = bot_int[1::]
+        
+        topbot = list(np.hstack([eloff_top,eloff_bot]))
+        
+        eloff_array = self._sort_perBlock_calibData(topbot)
         
         if blind_vdd:
-            vdd['top'] = [top_int[0]]
-            vdd['bot'] = [bot_int[0]]
+            vdd_array[0] = np.array(vdd['top']).mean().flatten()
+            vdd_array[1] = np.array(vdd['bot']).mean().flatten()
+
         else:
-            ptat['top'] = [top_int[0]]
-            ptat['bot'] = [bot_int[0]]
-        
-        # ------ Average PTAT and VDD -------------------------------------------
-        vdd['top'] = np.array(vdd['top']).mean().flatten()
-        vdd['bot'] = np.array(vdd['bot']).mean().flatten()
-        
-        ptat['top'] = np.array(ptat['top']).mean().flatten()
-        ptat['bot'] = np.array(ptat['bot']).mean().flatten()
-        
-        return {'pix'   : pixels,
-                'eloff' : eloff,
-                'ptat'  : ptat,
-                'vdd'   : vdd,
+            ptat_array[0] = np.array(ptat['top']).mean().flatten()
+            ptat_array[1] = np.array(ptat['bot']).mean().flatten()
+                
+        return {'pix'   : pix_array.flatten(),
+                'eloff' : eloff_array.flatten(),
+                'ptat'  : ptat_array.flatten(),
+                'vdd'   : vdd_array.flatten()        ,
                 't'     : raw_bytes['t']}
     
     # ── Continuous frame readout  ────────────────────────────────────────────
@@ -613,76 +625,76 @@ class I2C_HTPA32x32d(I2C_Driver):
         #         "t":         time.time()
         #     }
     
-    def convert_i2c_data(self,raw_data) -> dict :
+    # def convert_i2c_data(self,raw_data) -> dict :
         
-        n_blocks = int(_PIXELS / 2 / _BLOCK_PX)
-        n_ptat = 2
-        n_vdd = 2
+    #     n_blocks = int(_PIXELS / 2 / _BLOCK_PX)
+    #     n_ptat = 2
+    #     n_vdd = 2
         
-        pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)      # zero array for storing rearranged pixel data 
-        ptat_array = np.zeros((n_ptat,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
-        vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                     # zero array for storing rearranged ptat data 
+    #     pix_array = np.zeros((_ROWS,_COLS),dtype = np.uint16)      # zero array for storing rearranged pixel data 
+    #     ptat_array = np.zeros((n_ptat,),dtype = np.uint16)                   # zero array for storing rearranged ptat data 
+    #     vdd_array = np.zeros((n_vdd,),dtype = np.uint16)                     # zero array for storing rearranged ptat data 
 
         
-        if 'pix' in raw_data.keys():
+    #     if 'pix' in raw_data.keys():
             
-            for block in range(4):
-                    top = raw_data['pix'][block]['top']      # block data from top half
-                    bot = raw_data['pix'][block]['bot']      # block data from bottom half
+    #         for block in range(4):
+    #                 top = raw_data['pix'][block]['top']      # block data from top half
+    #                 bot = raw_data['pix'][block]['bot']      # block data from bottom half
                     
-                    # Rearrange top and bottom half according to page 11
-                    top = top.reshape((n_blocks,_COLS))
-                    bot = np.flipud(bot.reshape((n_blocks,_COLS)))
+    #                 # Rearrange top and bottom half according to page 11
+    #                 top = top.reshape((n_blocks,_COLS))
+    #                 bot = np.flipud(bot.reshape((n_blocks,_COLS)))
                     
-                    pix_array[block*n_blocks:(block+1)*n_blocks,:] = top
+    #                 pix_array[block*n_blocks:(block+1)*n_blocks,:] = top
                     
-                    if block == 0:
-                        pix_array[(-block-1)*n_blocks::,:] = bot
-                    else:
-                        pix_array[(-block-1)*n_blocks:-block*n_blocks,:] = bot
+    #                 if block == 0:
+    #                     pix_array[(-block-1)*n_blocks::,:] = bot
+    #                 else:
+    #                     pix_array[(-block-1)*n_blocks:-block*n_blocks,:] = bot
                         
                                 
-        if 'ptat' in raw_data.keys():
+    #     if 'ptat' in raw_data.keys():
             
-            top = raw_data['ptat']['top']                   # ptat data from top half
-            bot = raw_data['ptat']['bot']                   # ptat data from bottom half
+    #         top = raw_data['ptat']['top']                   # ptat data from top half
+    #         bot = raw_data['ptat']['bot']                   # ptat data from bottom half
                            
-            ptat_array[0] = top[0]
-            ptat_array[1] = bot[0]
+    #         ptat_array[0] = top[0]
+    #         ptat_array[1] = bot[0]
         
-        if 'vdd' in raw_data.keys():
+    #     if 'vdd' in raw_data.keys():
             
-            top = raw_data['vdd']['top']                    # vdd data from top half
-            bot = raw_data['vdd']['bot']                    # vdd data from bottom half
+    #         top = raw_data['vdd']['top']                    # vdd data from top half
+    #         bot = raw_data['vdd']['bot']                    # vdd data from bottom half
                            
-            vdd_array[0] = top[0]
-            vdd_array[1] = bot[0]      
+    #         vdd_array[0] = top[0]
+    #         vdd_array[1] = bot[0]      
                 
                 
-        if 'eloff' in raw_data.keys():
+    #     if 'eloff' in raw_data.keys():
             
-            top = raw_data['eloff']['top']      # block data from top half
-            bot = raw_data['eloff']['bot']      # block data from bottom half
+    #         top = raw_data['eloff']['top']      # block data from top half
+    #         bot = raw_data['eloff']['bot']      # block data from bottom half
             
-            topbot = list(np.hstack([top,bot]))
+    #         topbot = list(np.hstack([top,bot]))
             
-            eloff_array = self._sort_perBlock_calibData(topbot)
+    #         eloff_array = self._sort_perBlock_calibData(topbot)
         
-        data = {}
+    #     data = {}
         
-        if 'pix' in raw_data.keys():
-            data['pix'] = pix_array.flatten()
+    #     if 'pix' in raw_data.keys():
+    #         data['pix'] = pix_array.flatten()
             
-        if 'eloff' in raw_data.keys():
-            data['eloff'] = eloff_array.flatten()
+    #     if 'eloff' in raw_data.keys():
+    #         data['eloff'] = eloff_array.flatten()
 
-        if 'ptat' in raw_data.keys():
-            data['ptat'] = ptat_array.flatten()
+    #     if 'ptat' in raw_data.keys():
+    #         data['ptat'] = ptat_array.flatten()
 
-        if 'vdd' in raw_data.keys():
-            data['vdd'] = vdd_array.flatten()            
+    #     if 'vdd' in raw_data.keys():
+    #         data['vdd'] = vdd_array.flatten()            
         
-        return data
+    #     return data
 
 
     # ── Temperature calculation ──────────────────────────────────────────────
