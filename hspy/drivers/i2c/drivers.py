@@ -1000,7 +1000,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         msg_w = i2c_msg.write(self._addr, [cmd])
         msg_r = i2c_msg.read(self._addr, length)
         self._bus.i2c_rdwr(msg_w, msg_r)
-        return list(msg_r)
+        return msg_r #list(msg_r)
 
     def _read_half(self, cmd: int) -> List[int]:
         """
