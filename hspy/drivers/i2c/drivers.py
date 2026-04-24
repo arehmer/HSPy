@@ -353,16 +353,16 @@ class I2C_HTPA32x32d(I2C_Driver):
                 data = self._raw_bytes_to_int(data,
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
-                # data = self.convert_i2c_data(data)                 # convert raw i2c data int
+                data = self.convert_i2c_data(data)                 # convert raw i2c data int
                 
-                # if applyCalib:
+                if applyCalib:
                     
-                #     # Calculcate Temperatures from pixel voltages
-                #     data = self.apply_calib(data)
+                    # Calculcate Temperatures from pixel voltages
+                    data = self.apply_calib(data)
                     
-                # if calcdK:
+                if calcdK:
                     
-                #     data = self.apply_LuT(data)
+                    data = self.apply_LuT(data)
                 
                 # Set success flag
                 data['success'] = True
@@ -418,32 +418,32 @@ class I2C_HTPA32x32d(I2C_Driver):
                 ptat['top'].append(top_int[0])
                 ptat['bot'].append(bot_int[0])
             
-            # pixels[block]['top'] = top_int[1::]
-            # pixels[block]['bot'] = bot_int[1::]
+            pixels[block]['top'] = top_int[1::]
+            pixels[block]['bot'] = bot_int[1::]
                
         # ----------- Convert electrical offsets and vdd/ptat -----------------
-        # top_raw = raw_bytes['eloff']['top']
-        # bot_raw = raw_bytes['eloff']['bot']
+        top_raw = raw_bytes['eloff']['top']
+        bot_raw = raw_bytes['eloff']['bot']
         
-        # top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
-        # bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
+        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
+        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
         
-        # eloff['top'] = top_int[1::]
-        # eloff['bot'] = bot_int[1::]
+        eloff['top'] = top_int[1::]
+        eloff['bot'] = bot_int[1::]
         
-        # if blind_vdd:
-        #     vdd['top'] = [top_int[0]]
-        #     vdd['bot'] = [bot_int[0]]
-        # else:
-        #     ptat['top'] = [top_int[0]]
-        #     ptat['bot'] = [bot_int[0]]
+        if blind_vdd:
+            vdd['top'] = [top_int[0]]
+            vdd['bot'] = [bot_int[0]]
+        else:
+            ptat['top'] = [top_int[0]]
+            ptat['bot'] = [bot_int[0]]
         
         # ------ Average PTAT and VDD -------------------------------------------
-        # vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
-        # vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
+        vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
+        vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
         
-        # ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
-        # ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
+        ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
+        ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
         
         return {'pix'   : pixels,
                 'eloff' : eloff,
@@ -510,7 +510,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
         # --- Read in raw bytes of top and lower half from all four blocks ---
-        raw_bytes: dict[str, i2c_msg] =  {'top': [] , 'bot': [] }
+        raw_bytes: dict[int, dict[str, i2c_msg]] = \
+            {b : {'top': [] , 'bot': [] } for b in range(4)}
         
         for block in range(4):
             
