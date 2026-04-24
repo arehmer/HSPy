@@ -348,16 +348,16 @@ class I2C_HTPA32x32d(I2C_Driver):
                 data = self._raw_bytes_to_int(data,
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
-                data = self.convert_i2c_data(data)                 # convert raw i2c data int
+                # data = self.convert_i2c_data(data)                 # convert raw i2c data int
                 
-                if applyCalib:
+                # if applyCalib:
                     
-                    # Calculcate Temperatures from pixel voltages
-                    data = self.apply_calib(data)
+                #     # Calculcate Temperatures from pixel voltages
+                #     data = self.apply_calib(data)
                     
-                if calcdK:
+                # if calcdK:
                     
-                    data = self.apply_LuT(data)
+                #     data = self.apply_LuT(data)
                 
                 # Set success flag
                 data['success'] = True
@@ -395,9 +395,9 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         # ------------- Convert pixels and vdd/ptat ---------------------------
         
-        for block in range(len(raw_bytes['pixels'])):
-            top_raw = raw_bytes['pixels'][block]['top']
-            bot_raw = raw_bytes['pixels'][block]['bot']
+        for block in range(len(raw_bytes['pix'])):
+            top_raw = raw_bytes['pix'][block]['top']
+            bot_raw = raw_bytes['pix'][block]['bot']
             
             top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
             bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
@@ -536,7 +536,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             raw_bytes[block]['bot'] = bot_raw
         
         # ------ Return -------------------------------------------------------       
-        return {'pixels':raw_bytes, 't':time.time()}
+        return {'pix':raw_bytes, 't':time.time()}
         
         # # ------ Return -------------------------------------------------------
         # if measure_vdd:
