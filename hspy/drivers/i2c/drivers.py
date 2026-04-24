@@ -353,6 +353,19 @@ class I2C_HTPA32x32d(I2C_Driver):
                 data = self._raw_bytes_to_int(data,
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
+                
+                print(data['pix'][0]['top'].shape)
+                print(data['pix'][0]['bot'].shape)
+                
+                print(data['eloff']['bot'].shape)
+                print(data['eloff']['bot'].shape)
+                
+                print(type(data['vdd']['bot']))
+                print(type(data['vdd']['bot']))
+                
+                print(type(data['ptat']['bot']))
+                print(type(data['ptat']['bot']))
+                
                 # print(data.keys())
                 # print(data)
                 
