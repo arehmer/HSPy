@@ -431,11 +431,11 @@ class I2C_HTPA32x32d(I2C_Driver):
             ptat['bot'] = [bot_int[0]]
         
         # ------ Average PTAT and VDD -------------------------------------------
-        vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
-        vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
+        # vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
+        # vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
         
-        ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
-        ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
+        # ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
+        # ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
         
         return {'pix'   : pixels,
                 'eloff' : eloff,
