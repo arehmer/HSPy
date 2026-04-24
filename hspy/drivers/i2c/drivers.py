@@ -450,12 +450,12 @@ class I2C_HTPA32x32d(I2C_Driver):
         eloff_array = self._sort_perBlock_calibData(topbot)
         
         if blind_vdd:
-            vdd_array[0] = np.array(vdd['top']).mean().flatten()
-            vdd_array[1] = np.array(vdd['bot']).mean().flatten()
+            vdd_array[0] = np.array(vdd['top']).mean().flatten()[0]
+            vdd_array[1] = np.array(vdd['bot']).mean().flatten()[0]
 
         else:
-            ptat_array[0] = np.array(ptat['top']).mean().flatten()
-            ptat_array[1] = np.array(ptat['bot']).mean().flatten()
+            ptat_array[0] = np.array(ptat['top']).mean().flatten()[0]
+            ptat_array[1] = np.array(ptat['bot']).mean().flatten()[0]
                 
         return {'pix'   : pix_array.flatten(),
                 'eloff' : eloff_array.flatten(),
