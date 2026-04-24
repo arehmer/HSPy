@@ -403,6 +403,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         vdd: dict[str, list[int]] =  {'top': [] ,
                                        'bot': [] }
         
+        print(raw_bytes)
+        
         # ------------- Convert pixels and vdd/ptat ---------------------------
         
         for block in range(len(raw_bytes['pix'])):
