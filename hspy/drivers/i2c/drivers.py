@@ -420,8 +420,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             pixels[block]['bot'] = bot_int[1::]
                
         # ----------- Convert electrical offsets and vdd/ptat -----------------
-        top_raw = raw_bytes['eloff']['top']
-        bot_raw = raw_bytes['eloff']['bot']
+        # top_raw = raw_bytes['eloff']['top']
+        # bot_raw = raw_bytes['eloff']['bot']
         
         # top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
         # bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
