@@ -312,22 +312,28 @@ class I2C_HTPA32x32d(I2C_Driver):
 
 
     
-    def _read_thread(self):
+    def _read_thread(self,
+                     active_vdd:bool = True,        # sample vdd when BLIND bit is not set
+                     blind_vdd:bool = False):       # sample vdd when BLIND bit is set
         """
         Threadable function for i2c readouts 
         """
                
         while not self.i2c_stop.is_set():
             
-            data_dict = self.read_frame(measure_vdd = True)                         # read pixels, ptat, vdd
-            data_dict.update(self.read_electrical_offsets(measure_vdd = False))     # read electrical offsets
+            data_dict = self.read_frame(active_vdd)                       # read pixels, ptat, vdd
+            data_dict.update(self.read_electrical_offsets(blind_vdd))     # read electrical offsets
             
-            self.i2c_queue.put(data_dict)                                           # put in queue, blocks if full (backpressure)
+            self.i2c_queue.put(data_dict)                                 # put in queue, blocks if full (backpressure)
 
             # Increment counter
             self._image_counter += 1
             
-    def _processing_thread(self,applyCalib:bool=True,calcdK:bool=True):
+    def _processing_thread(self,
+                           active_vdd:bool = True,  # sample vdd when BLIND bit is not set
+                           blind_vdd:bool = False,  # sample vdd when BLIND bit is set
+                           applyCalib:bool=True,    # apply calibration for Ud compensation
+                           calcdK:bool=True):       # apply LuT to Ud_comp 
         """
         Threadable function for converting raw i2c data into the appropriate 
         format (sorting, rearranging, conversion)
@@ -339,16 +345,19 @@ class I2C_HTPA32x32d(I2C_Driver):
             
             try:
                 data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
-                # data = self.convert_i2c_data(data)            # convert raw i2c data in place
+                data = self._raw_bytes_to_int(data,
+                                              active_vdd,
+                                              blind_vdd)           # convert raw bytes to int
+                data = self.convert_i2c_data(data)                 # convert raw i2c data int
                 
-                # if applyCalib:
+                if applyCalib:
                     
-                #     # Calculcate Temperatures from pixel voltages
-                #     data = self.apply_calib(data)
+                    # Calculcate Temperatures from pixel voltages
+                    data = self.apply_calib(data)
                     
-                # if calcdK:
+                if calcdK:
                     
-                #     data = self.apply_LuT(data)
+                    data = self.apply_LuT(data)
                 
                 # Set success flag
                 data['success'] = True
@@ -363,6 +372,76 @@ class I2C_HTPA32x32d(I2C_Driver):
                 
             except Exception as e:
                 print(f"[processing_thread] {e}")                
+    
+    def _raw_bytes_to_int(self,raw_bytes:dict, active_vdd:bool, blind_vdd:bool):
+        
+        # Code is written such, that it requires active_vdd and blind_vdd
+        # to be different:
+        if active_vdd == blind_vdd:
+            raise ValueError('active_vdd and blind_vdd must not be equal!')
+        
+        
+        # ------------- Convert raw bytes into pairs of integers -------------
+        pixels: dict[int, dict[str, list[int]]] = \
+            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
+             for b in range(4)}
+                
+        eloff: dict[str, list[int]] = {'top': [0] * _BLOCK_PX, 
+                                       'bot': [0] * _BLOCK_PX}
+                                        
+        ptat: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+
+        vdd: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+        
+        # ------------- Convert pixels and vdd/ptat ---------------------------
+        
+        for block in range(len(raw_bytes['pixels'])):
+            top_raw = raw_bytes['pixels'][block]['top']
+            bot_raw = raw_bytes['pixels'][block]['bot']
+            
+            top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
+            bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
+        
+            # Word[0] = PTAT (or VDD if active_vdd set)
+            if active_vdd:
+                vdd['top'].append(top_int[0])
+                vdd['bot'].append(bot_int[0])
+            else:
+                ptat['top'].append(top_int[0])
+                ptat['bot'].append(bot_int[0])
+            
+            pixels[block]['top'] = top_int[1::]
+            pixels[block]['bot'] = bot_int[1::]
+               
+        # ----------- Convert electrical offsets and vdd/ptat -----------------
+        top_raw = raw_bytes['eloff']['top']
+        bot_raw = raw_bytes['eloff']['bot']
+        
+        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
+        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
+        
+        eloff['top'] = top_int[1::]
+        eloff['bot'] = bot_int[1::]
+        
+        if blind_vdd:
+            vdd['top'] = [top_int[0]]
+            vdd['bot'] = [bot_int[0]]
+        else:
+            ptat['top'] = [top_int[0]]
+            ptat['bot'] = [bot_int[0]]
+        
+        # ------ Average PTAT and VDD -------------------------------------------
+        vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
+        vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
+        
+        ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
+        ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
+        
+        return {'pix'   : pixels,
+                'eloff' : eloff,
+                'ptat'  : ptat,
+                'vdd'   : vdd,
+                't'     : raw_bytes['t']}
     
     # ── Continuous frame readout  ────────────────────────────────────────────
     def start_i2cstream(self):
@@ -414,7 +493,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         Returns
         -------
         dict with keys:
-          "pix"     - list[1024] raw ADC digits (uint16)
+          "pix"        - list[1024] raw ADC digits (uint16)
           "el_offsets" - list[256]  electrical offset digits (uint16)
           "ptat_av"    - PTAT average from the stack (float)
           "vdd_av"     - VDD average from the stack  (float or None)
@@ -423,8 +502,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
         # --- Read in raw bytes of top and lower half from all four blocks ---
-        
         raw_bytes: dict[str, i2c_msg] =  {'top': [] , 'bot': [] }
+        
         for block in range(4):
             
             raw_bytes[block] = {}
@@ -455,56 +534,75 @@ class I2C_HTPA32x32d(I2C_Driver):
             
             raw_bytes[block]['top'] = top_raw
             raw_bytes[block]['bot'] = bot_raw
-            
-        # ------------- Convert raw bytes into pairs of integers -------------
-        pixels: dict[int, dict[str, list[int]]] = \
-            {b: {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX} \
-             for b in range(4)}
-                                        
-        ptat: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+        
+        # ------ Return -------------------------------------------------------       
+        return {'pixels':raw_bytes, 't':time.time()}
+        
+        # # ------ Return -------------------------------------------------------
+        # if measure_vdd:
+        #     return {
+        #         "pix":     pixels,
+        #         "vdd":        vdd,
+        #         "t":          time.time()
+        #     }
+        # else:
+        #     return {
+        #         "pix":     pixels,
+        #         "ptat":       ptat,
+        #         "t":          time.time()
+        #     }
+        # ── Eletrical Offset Readout ─────────────────────────────────────────────────
+    def read_electrical_offsets(self, measure_vdd: bool = False) -> List[int]:
+        """
+        Trigger a BLIND conversion and read all 256 electrical offset values.
 
-        vdd: dict[str, list[int]] =  {'top': [] , 'bot': [] }
+        Returns list[256] of uint16 values:
+          [0..127]   top-half electrical offsets
+          [128..255] bottom-half electrical offsets
+        """
         
-        for block in range(4):
-            top_raw = raw_bytes[block]['top']
-            bot_raw = raw_bytes[block]['bot']
-            
-            top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
-            bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
-        
-        
-            # Word[0] = PTAT (or VDD if VDD_MEAS set)
-            if measure_vdd:
-                vdd['top'].append(top_int[0])
-                vdd['bot'].append(bot_int[0])
-            else:
-                ptat['top'].append(top_int[0])
-                ptat['bot'].append(bot_int[0])
-            
-            pixels[block]['top'] = top_int[1::]
-            pixels[block]['bot'] = bot_int[1::]
+        # eloff: dict[str, list[int]] = {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX}
                 
-        # ------ Average PTAT / VDD -------------------------------------------
-        if measure_vdd:
-            vdd['top'] = [int(np.round(sum (vdd['top']) / len (vdd['top'])))]
-            vdd['bot'] = [int(np.round(sum (vdd['bot']) / len (vdd['bot'])))]
-        else:
-            ptat['top'] = [int(np.round(sum (ptat['top']) / len (ptat['top'])))]
-            ptat['bot'] = [int(np.round(sum (ptat['bot']) / len (ptat['bot'])))]
+        # ptat: dict[str, list[int]] = {'top': [] , 'bot': [] }
+
+        # vdd: dict[str, list[int]] = {'top': [] , 'bot': [] }
         
-        # ------ Return -------------------------------------------------------
-        if measure_vdd:
-            return {
-                "pix":     pixels,
-                "vdd":        vdd,
-                "t":          time.time()
-            }
-        else:
-            return {
-                "pix":     pixels,
-                "ptat":       ptat,
-                "t":          time.time()
-            }
+        t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
+
+        # Write to config register 
+        self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START | _BIT_BLIND)
+        
+        # Pause 90 % of the approximate conversion time before checking
+        # if end of conversion is reached
+        time.sleep(0.9*t_fr4*1E-3)
+        
+        # Start checking for end of conversion bit
+        self._wait_eoc()
+        
+        # Read frame from register
+        top_raw = self._read_half(_CMD_READ_TOP)  # 258 bytes
+        bot_raw = self._read_half(_CMD_READ_BOT)  # 258 bytes
+        
+
+        
+        return {'eloff':{'top':top_raw,'bot':bot_raw}}
+        
+
+        
+
+        
+        # if measure_vdd:
+        #     return {
+        #         "eloff":     eloff,
+        #         "vdd":       vdd,
+        #         "t":         time.time()
+        #     }
+        # else:
+        #     return {
+        #         "eloff":     eloff,
+        #         "ptat":      ptat,
+        #         "t":         time.time()
+        #     }
     
     def convert_i2c_data(self,raw_data) -> dict :
         
@@ -1021,64 +1119,7 @@ class I2C_HTPA32x32d(I2C_Driver):
                 )
             time.sleep(_T_POLL_MS * 1e-3)
 
-    # ── Private: electrical offsets ───────────────────────────────────────────
 
-    def read_electrical_offsets(self, measure_vdd: bool = False) -> List[int]:
-        """
-        Trigger a BLIND conversion and read all 256 electrical offset values.
-
-        Returns list[256] of uint16 values:
-          [0..127]   top-half electrical offsets
-          [128..255] bottom-half electrical offsets
-        """
-        
-        eloff: dict[str, list[int]] = {'top': [0] * _BLOCK_PX, 'bot': [0] * _BLOCK_PX}
-                
-        ptat: dict[str, list[int]] = {'top': [] , 'bot': [] }
-
-        vdd: dict[str, list[int]] = {'top': [] , 'bot': [] }
-        
-        t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
-
-        # Write to config register 
-        self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START | _BIT_BLIND)
-        
-        # Pause 90 % of the approximate conversion time before checking
-        # if end of conversion is reached
-        time.sleep(0.9*t_fr4*1E-3)
-        
-        # Start checking for end of conversion bit
-        self._wait_eoc()
-        
-        # Read frame from register
-        top_raw = self._read_half(_CMD_READ_TOP)  # 258 bytes
-        bot_raw = self._read_half(_CMD_READ_BOT)  # 258 bytes
-        
-        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 bytes
-        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 bytes
-        
-        if measure_vdd:
-            vdd['top'] = [top_int[0]]
-            vdd['bot'] = [bot_int[0]]
-        else:
-            ptat['top'] = [top_int[0]]
-            ptat['bot'] = [bot_int[0]]
-        
-        eloff['top'] = top_int[1::]
-        eloff['bot'] = bot_int[1::]
-        
-        if measure_vdd:
-            return {
-                "eloff":     eloff,
-                "vdd":       vdd,
-                "t":         time.time()
-            }
-        else:
-            return {
-                "eloff":     eloff,
-                "ptat":      ptat,
-                "t":         time.time()
-            }
 
     # ── Private: sensitivity coefficients ────────────────────────────────────
 
