@@ -353,16 +353,20 @@ class I2C_HTPA32x32d(I2C_Driver):
                 data = self._raw_bytes_to_int(data,
                                               active_vdd,
                                               blind_vdd)           # convert raw bytes to int
-                data = self.convert_i2c_data(data)                 # convert raw i2c data int
+                print(data.keys())
+                print(data)
                 
-                if applyCalib:
+                
+                # data = self.convert_i2c_data(data)                 # convert raw i2c data int
+                
+                # if applyCalib:
                     
-                    # Calculcate Temperatures from pixel voltages
-                    data = self.apply_calib(data)
+                #     # Calculcate Temperatures from pixel voltages
+                #     data = self.apply_calib(data)
                     
-                if calcdK:
+                # if calcdK:
                     
-                    data = self.apply_LuT(data)
+                #     data = self.apply_LuT(data)
                 
                 # Set success flag
                 data['success'] = True
