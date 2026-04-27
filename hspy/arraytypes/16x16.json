@@ -2,6 +2,11 @@
 	"EEPROM":
 	{
 
+	"DevID" : {
+		"dtype": "uint32",
+		"adr_start": "0x74",
+		"adr_stop":  "0x77"},
+
 	"pixcmin": {
 		"dtype": "float32",
 		"adr_start": "0x00",
@@ -17,16 +22,150 @@
 		"adr_start": "0x10",
 		"adr_stop":  "0x10"},
 
+	"Th1Scale": {
+		"dtype": "uint8",
+		"adr_start": "0x14",
+		"adr_stop":  "0x14"},
 
-	"globalGain": {
+	"Th2Scale": {
+		"dtype": "uint8",
+		"adr_start": "0x15",
+		"adr_stop":  "0x15"},
+
+	"Vdd1Scale": {
+		"dtype": "uint8",
+		"adr_start": "0x16",
+		"adr_stop": "0x16"},
+
+	"Vdd2Scale": {
+		"dtype": "uint8",
+		"adr_start": "0x17",
+		"adr_stop": "0x17"},
+
+	"Tablenumber": {
 		"dtype": "uint16",
-		"adr_start": "0x12",
-		"adr_stop": "0x13"},
+		"adr_start": "0x18",
+		"adr_stop":  "0x19"},
 
 	"epsilon": {
 		"dtype": "uint8",
 		"adr_start": "0x1A",
 		"adr_stop":  "0x1A"},
+
+	"MBIT(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x34",
+		"adr_stop":  "0x34"},
+
+	"BIAS(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x36",
+		"adr_stop":  "0x36"},
+
+	"CLK(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x38",
+		"adr_stop":  "0x38"},
+
+	"BPA(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x3A",
+		"adr_stop":  "0x3A"},
+
+	"PU(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x3C",
+		"adr_stop":  "0x3C"},
+
+	"MBIT(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x40",
+		"adr_stop":  "0x40"},
+
+	"BIAS(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x42",
+		"adr_stop":  "0x42"},
+
+	"CLK(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x44",
+		"adr_stop":  "0x44"},
+
+	"BPA(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x46",
+		"adr_stop":  "0x46"},
+
+	"PU(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x48",
+		"adr_stop":  "0x48"},
+
+	"avgVDD_ThCalib_@(Ta1,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x4A",
+		"adr_stop":  "0x4B"},
+
+	"avgVDD_ThCalib_@(Ta2,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x4C",
+		"adr_stop":  "0x4D"},
+
+	"avgVDD_ThCalib_@(Ta1,Vdd1)": {
+		"dtype": "uint16",
+		"adr_start": "0x4E",
+		"adr_stop":  "0x4F"},
+
+	"avgVDD_ThCalib_@(Ta2,Vdd1)": {
+		"dtype": "uint16",
+		"adr_start": "0x50",
+		"adr_stop":  "0x51"},
+
+	"globalGain": {
+		"dtype": "uint16",
+		"adr_start": "0x52",
+		"adr_stop": "0x53"},
+
+	"avgPTAT_ThCalib_@(Ta1,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x58",
+		"adr_stop":  "0x59"},
+
+	"avgPTAT_ThCalib_@(Ta2,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x5A",
+		"adr_stop":  "0x5B"},
+
+	"TrayTemp_ThCalib_@(Ta1,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x5C",
+		"adr_stop":  "0x5D"},
+
+	"TrayTemp_ThCalib_@(Ta2,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x5E",
+		"adr_stop":  "0x5F"},
+
+	"TrayTemp_PTATCalib_@(Ta1,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x60",
+		"adr_stop":  "0x61"},
+
+	"TrayTemp_PTATCalib_@(Ta2,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x62",
+		"adr_stop":  "0x63"},
+
+	"avgPTAT_PTATCalib_@(Ta1,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x64",
+		"adr_stop":  "0x65"},
+
+	"avgPTAT_PTATCalib_@(Ta2,Vdd2)": {
+		"dtype": "uint16",
+		"adr_start": "0x66",
+		"adr_stop":  "0x67"},
 
 	"ptatGrad": {
 		"dtype": "float32",
