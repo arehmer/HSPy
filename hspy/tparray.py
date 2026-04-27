@@ -361,7 +361,7 @@ class TPArray():
             
         elif self.ArrayType in [ArrayTypes['HTPA16x16'],
                                 ArrayTypes['HTPA16x16dR3']]:
-            self.DevConst['NROFATC']=0
+            self.DevConst['NROFATC']=2
             self.DevConst['NROFBLOCKS']=2
             self.DevConst['NROFPTAT']=2
             
@@ -668,7 +668,10 @@ class TPArray():
         
         # Read and convert data according to provided json file
         for key in ee.keys():
-
+            print(key)
+            if key == 'pij':
+                pass
+            
             # Ge start and stop indices from addresses
             idx_start = int(ee[key]['adr_start'],0)
             idx_stop = int(ee[key]['adr_stop'],0)+1
@@ -683,7 +686,11 @@ class TPArray():
         # Convert all EEPROM values from lists to numpy array
         for key in bcc.keys():
             bcc[key] = np.array(bcc[key]) 
-
+            
+            
+        # Special case for 16x16 Arrays because of different EEPROM 
+        # if self.ArrayType == ArrayTypes['HTPA16x16']
+        
         # Derive calibration settings from raw values
         bcc = self._derive_calib_settings(bcc)
 
@@ -771,6 +778,10 @@ class TPArray():
         https://docs.python.org/3/library/struct.html#struct-format-strings
         """
         
+        if dtype == 'float16':
+            b_idx = np.arange(0,len(raw_val),2)
+            conv_val = [struct.unpack('e',raw_val[b:b+2])[0] for b in  b_idx]
+        
         if dtype == 'float32':
             b_idx = np.arange(0,len(raw_val),4)
             conv_val = [struct.unpack('f',raw_val[b:b+4])[0] for b in  b_idx]
@@ -833,7 +844,7 @@ class TPArray():
             else:
                 REFCAL_user = np.nan        
                 
-        bcc['REFCAL(user)'] = REFCAL_user
+            # bcc['REFCAL(user)'] = REFCAL_user
 
         return bcc
 
