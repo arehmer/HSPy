@@ -238,10 +238,10 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._msg_read_bot_w = i2c_msg.write(self._addr, [_CMD_READ_BOT])
         self._msg_read_bot_r = i2c_msg.read(self._addr, 258)
         
-        # Pre-allocate a reusable config write buffer
-        self._config_buf = [0x00, 0x00]  # [cmd, value]
+        # Pre-allocate reusable write message 
+        self._msg_write = i2c_msg.write(self._addr, [0x00, 0x00])
         
-        #  Pre-allocate a reusable status message buffer
+        # Pre-allocate status messages
         self._msg_status_w = i2c_msg.write(self._addr, [_CMD_STATUS])
         self._msg_status_r = i2c_msg.read(self._addr, 1)
     
@@ -1101,10 +1101,8 @@ class I2C_HTPA32x32d(I2C_Driver):
     def read_status(self) -> int:
         """Return the raw 8-bit status register value."""
         self._bus.i2c_rdwr(self._msg_status_w, self._msg_status_r)
-        
-        status_byte = int.from_bytes(read_msg.buf[0])
-      
-        return status_byte
+
+        return int.from_bytes(self._msg_status_r.buf[0])
 
     def is_eoc(self) -> bool:
         """True when the End-of-Conversion flag is set."""
