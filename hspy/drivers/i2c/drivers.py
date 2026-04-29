@@ -126,7 +126,7 @@ _BLOCKS_ = 4
 _PCSCALEVAL      = 1e8    # Section 12.5
 _T_INTER_REG_MS  = 5      # min delay between writing trim registers
 _T_WAKEUP_US     = 80     # wakeup time after WAKEUP command (Table 5)
-_T_POLL_MS       = 1      # EOC polling interval
+_T_POLL_MS       = 0.1      # EOC polling interval in ms
 _Tbuf            = 0.5    # µs,  time between STOP / START  
 _F_CLK_MIN       = 1      # MHz, min. clock frequency
 _F_CLK_MAX       = 13     # MHz, max. clock frequency
@@ -418,8 +418,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             top_raw = raw_bytes['pix'][block]['top']
             bot_raw = raw_bytes['pix'][block]['bot']
             
-            top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
-            bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
+            top_int = np.frombuffer(top_raw, dtype='>u2') 
+            bot_int = np.frombuffer(bot_raw, dtype='>u2') 
         
             # Word[0] = PTAT (or VDD if active_vdd set)
             if active_vdd:
@@ -448,8 +448,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         top_raw = raw_bytes['eloff']['top']
         bot_raw = raw_bytes['eloff']['bot']
         
-        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
-        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
+        top_int = np.frombuffer(top_raw, dtype='>u2') # 129 words
+        bot_int = np.frombuffer(bot_raw, dtype='>u2') # 129 words
         
         if blind_vdd:
             vdd['top'].append(top_int[0])
@@ -537,8 +537,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         t_fr4 = self._calib["t_fr4"]                                           # ms, block conversion time
 
         # --- Read in raw bytes of top and lower half from all four blocks ---
-        raw_bytes: dict[int, dict[str, i2c_msg]] = \
-            {b : {'top': [] , 'bot': [] } for b in range(4)}
+        raw_bytes: dict = {}
         
         for block in range(4):
             
@@ -1118,16 +1117,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._msg_write.buf[0] = cmd
         self._msg_write.buf[1] = value
         self._bus.i2c_rdwr(self._msg_write)
-
-    def _read_bytes(self, cmd: int, length: int) -> List[int]:
-        """
-        I2C read with repeated start (Figure 11):
-          S | ADDR W | CMD | Sr | ADDR R | D[0] ... D[n] nACK | P
-        """
-        msg_w = i2c_msg.write(self._addr, [cmd])
-        msg_r = i2c_msg.read(self._addr, length)
-        self._bus.i2c_rdwr(msg_w, msg_r)
-        return msg_r #list(msg_r)
 
     def _read_both_halves(self):
         self._bus.i2c_rdwr(self._msg_read_top_w, self._msg_read_top_r)
