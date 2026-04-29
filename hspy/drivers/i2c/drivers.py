@@ -237,7 +237,14 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._msg_read_top_r = i2c_msg.read(self._addr, 258)
         self._msg_read_bot_w = i2c_msg.write(self._addr, [_CMD_READ_BOT])
         self._msg_read_bot_r = i2c_msg.read(self._addr, 258)
-
+        
+        # Pre-allocate a reusable config write buffer
+        self._config_buf = [0x00, 0x00]  # [cmd, value]
+        
+        #  Pre-allocate a reusable status message buffer
+        self._msg_status_w = i2c_msg.write(self._addr, [_CMD_STATUS])
+        self._msg_status_r = i2c_msg.read(self._addr, 1)
+    
     def close(self) -> None:
         """Put sensor to sleep, then release the bus."""
         if self._bus is not None:
@@ -558,8 +565,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             self._wait_eoc()
 
             # Read frame from register
-            top_raw = self._read_half(_CMD_READ_TOP)  # 129 words
-            bot_raw = self._read_half(_CMD_READ_BOT)  # 129 words
+            top_raw, bot_raw = self._read_both_halves()
             
             raw_bytes[block]['top'] = top_raw
             raw_bytes[block]['bot'] = bot_raw
@@ -609,11 +615,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._wait_eoc()
         
         # Read frame from register
-        top_raw = self._read_half(_CMD_READ_TOP)  # 258 bytes
-        bot_raw = self._read_half(_CMD_READ_BOT)  # 258 bytes
-        
-
-        
+        top_raw, bot_raw = self._read_both_halves()
+                
         return {'eloff':{'top':top_raw,'bot':bot_raw}}
         
 
@@ -1097,10 +1100,7 @@ class I2C_HTPA32x32d(I2C_Driver):
 
     def read_status(self) -> int:
         """Return the raw 8-bit status register value."""
-        write_msg = i2c_msg.write(_ADDR_SENSOR, [_CMD_STATUS])
-        read_msg = i2c_msg.read(_ADDR_SENSOR, 1)
-        
-        self._bus.i2c_rdwr(write_msg, read_msg)
+        self._bus.i2c_rdwr(self._msg_status_w, self._msg_status_r)
         
         status_byte = int.from_bytes(read_msg.buf[0])
       
@@ -1116,7 +1116,10 @@ class I2C_HTPA32x32d(I2C_Driver):
         """
         I2C write:  S | ADDR W | CMD | VALUE | P     (Figure 10)
         """
-        self._bus.write_byte_data(self._addr, cmd, value)
+        
+        self._msg_write.buf[0] = cmd
+        self._msg_write.buf[1] = value
+        self._bus.i2c_rdwr(self._msg_write)
 
     def _read_bytes(self, cmd: int, length: int) -> List[int]:
         """
@@ -1128,21 +1131,28 @@ class I2C_HTPA32x32d(I2C_Driver):
         self._bus.i2c_rdwr(msg_w, msg_r)
         return msg_r #list(msg_r)
 
-    def _read_half(self, cmd: int) -> List[int]:
-        """
-        Read one 258-byte half-array response and decode into 129 uint16 words.
-        Each pixel/PTAT value is transmitted MSB first then LSB (big-endian pair).
+    def _read_both_halves(self):
+        self._bus.i2c_rdwr(
+            self._msg_read_top_w, self._msg_read_top_r,
+            self._msg_read_bot_w, self._msg_read_bot_r
+        )
+        return self._msg_read_top_r, self._msg_read_bot_r
 
-        Returns
-        -------
-        list[129]:  index 0 = PTAT (or VDD),  index 1..128 = pixel data
-        """
-        if cmd == _CMD_READ_TOP:
-            self._bus.i2c_rdwr(self._msg_read_top_w, self._msg_read_top_r)
-            return self._msg_read_top_r
-        else:
-            self._bus.i2c_rdwr(self._msg_read_bot_w, self._msg_read_bot_r)
-            return self._msg_read_bot_r
+    # def _read_half(self, cmd: int) -> List[int]:
+    #     """
+    #     Read one 258-byte half-array response and decode into 129 uint16 words.
+    #     Each pixel/PTAT value is transmitted MSB first then LSB (big-endian pair).
+
+    #     Returns
+    #     -------
+    #     list[129]:  index 0 = PTAT (or VDD),  index 1..128 = pixel data
+    #     """
+    #     if cmd == _CMD_READ_TOP:
+    #         self._bus.i2c_rdwr(self._msg_read_top_w, self._msg_read_top_r)
+    #         return self._msg_read_top_r
+    #     else:
+    #         self._bus.i2c_rdwr(self._msg_read_bot_w, self._msg_read_bot_r)
+    #         return self._msg_read_bot_r
 
     def _wait_eoc(self) -> None:
         """Poll the status register until EOC is set or the timeout expires."""
