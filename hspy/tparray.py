@@ -373,8 +373,7 @@ class TPArray():
             self.Ampl = 40          #equal for r3  
             
             self._mask = np.ones(self._npsize)
-            
-            print('16x16.json has not yet been tested!')
+
             # path to array data
             path = Path(__file__).parent / 'arraytypes' / '16x16.json'
             # Load calibration data from file
@@ -668,10 +667,7 @@ class TPArray():
         
         # Read and convert data according to provided json file
         for key in ee.keys():
-            print(key)
-            if key == 'pij':
-                pass
-            
+
             # Ge start and stop indices from addresses
             idx_start = int(ee[key]['adr_start'],0)
             idx_stop = int(ee[key]['adr_stop'],0)+1
