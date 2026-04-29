@@ -231,6 +231,12 @@ class I2C_HTPA32x32d(I2C_Driver):
     def open(self) -> None:
         """Open the I2C bus file descriptor."""
         self._bus = SMBus(self._bus_num)
+        
+        # Pre-allocate reusable read messages
+        self._msg_read_top_w = i2c_msg.write(self._addr, [_CMD_READ_TOP])
+        self._msg_read_top_r = i2c_msg.read(self._addr, 258)
+        self._msg_read_bot_w = i2c_msg.write(self._addr, [_CMD_READ_BOT])
+        self._msg_read_bot_r = i2c_msg.read(self._addr, 258)
 
     def close(self) -> None:
         """Put sensor to sleep, then release the bus."""
@@ -1131,9 +1137,12 @@ class I2C_HTPA32x32d(I2C_Driver):
         -------
         list[129]:  index 0 = PTAT (or VDD),  index 1..128 = pixel data
         """
-        raw   = self._read_bytes(cmd, 258)
-        # words = [(raw[i] << 8) | raw[i + 1] for i in range(0, 258, 2)]
-        return raw
+        if cmd == _CMD_READ_TOP:
+            self._bus.i2c_rdwr(self._msg_read_top_w, self._msg_read_top_r)
+            return self._msg_read_top_r
+        else:
+            self._bus.i2c_rdwr(self._msg_read_bot_w, self._msg_read_bot_r)
+            return self._msg_read_bot_r
 
     def _wait_eoc(self) -> None:
         """Poll the status register until EOC is set or the timeout expires."""
