@@ -1103,10 +1103,6 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         return int.from_bytes(self._msg_status_r.buf[0])
 
-    def is_eoc(self) -> bool:
-        """True when the End-of-Conversion flag is set."""
-        return bool(self.read_status() & _BIT_EOC)
-
     # ── Private: low-level I2C ────────────────────────────────────────────────
 
     def _write_register(self, cmd: int, value: int) -> None:
@@ -1142,12 +1138,14 @@ class I2C_HTPA32x32d(I2C_Driver):
     def _wait_eoc(self) -> None:
         """Poll the status register until EOC is set or the timeout expires."""
         deadline = time.monotonic() + self._timeout_ms / 1e3
-        while not self.is_eoc():
+        while True:
+            self._bus.i2c_rdwr(self._msg_status_w, self._msg_status_r)
+            if self._msg_status_r.buf[0] & _BIT_EOC:
+                return
             if time.monotonic() > deadline:
                 raise I2C_HTPA32x32dError(
                     f"Timeout ({self._timeout_ms} ms) waiting for EOC."
                 )
-            time.sleep(_T_POLL_MS * 1e-3)
 
 
 
