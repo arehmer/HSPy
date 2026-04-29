@@ -1146,9 +1146,7 @@ class I2C_HTPA32x32d(I2C_Driver):
                 raise I2C_HTPA32x32dError(
                     f"Timeout ({self._timeout_ms} ms) waiting for EOC."
                 )
-
-
-
+                
     # ── Private: sensitivity coefficients ────────────────────────────────────
 
     def _calc_pixc(self, c: dict) -> List[float]:
