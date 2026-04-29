@@ -1130,10 +1130,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         return msg_r #list(msg_r)
 
     def _read_both_halves(self):
-        self._bus.i2c_rdwr(
-            self._msg_read_top_w, self._msg_read_top_r,
-            self._msg_read_bot_w, self._msg_read_bot_r
-        )
+        self._bus.i2c_rdwr(self._msg_read_top_w, self._msg_read_top_r)
+        self._bus.i2c_rdwr(self._msg_read_bot_w, self._msg_read_bot_r)
         return self._msg_read_top_r, self._msg_read_bot_r
 
     # def _read_half(self, cmd: int) -> List[int]:
