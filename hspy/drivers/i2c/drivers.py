@@ -1140,7 +1140,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         deadline = time.monotonic() + self._timeout_ms / 1e3
         while True:
             self._bus.i2c_rdwr(self._msg_status_w, self._msg_status_r)
-            if self._msg_status_r.buf[0] & _BIT_EOC:
+            if int.from_bytes(self._msg_status_r.buf[0]) & _BIT_EOC:
                 return
             if time.monotonic() > deadline:
                 raise I2C_HTPA32x32dError(
