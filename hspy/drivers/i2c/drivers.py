@@ -1042,8 +1042,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         dead_pix_adr = dead_pix_adr[0:nr_def_pix]
         dead_pix_mask = dead_pix_mask[0:nr_def_pix]
         
-        # --- Calculate array indices of defect pixels from pixel addresses ---
-        DefPix_idx = self._PixAddress_to_PixIdx(dead_pix_adr)
+        # ------- Convert read-out-order indices to pixel array indices -------
+        DefPix_idx = self._ReadOutIdx_to_PixIdx(dead_pix_adr)
         
         # -- Get a dictionary that maps each pixel to a list of its neighbors-- 
         NeighMap = self._get_neighbors()
