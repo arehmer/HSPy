@@ -1037,19 +1037,46 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         """
 
-        # ------------- Get Neighbour Mapping for all pixels ------------------
-        NeighMap = self._get_neighbors()
+        # Truncate the list with addresses of dead pixels and corresponding
+        # masks to nr_def_pix elements
+        dead_pix_adr = dead_pix_adr[0:nr_def_pix]
+        dead_pix_mask = dead_pix_mask[0:nr_def_pix]
         
-        # ------- Calculate index of defect pixels from pixel addresses -------
+        # --- Calculate array indices of defect pixels from pixel addresses ---
         DefPix_idx = self._PixAddress_to_PixIdx(dead_pix_adr)
         
-        # -------------- Keep only mapping for defect pixels -----------------
-        def_pix_NeighMap = {pix : NeighMap[pix] for pix in DefPix_idx}
+        # -- Get a dictionary that maps each pixel to a list of its neighbors-- 
+        NeighMap = self._get_neighbors()
         
-        # Within that mapping, keep only those pixels that are listed in 
-        # dead_pix_mask
-        for pix_idx, mask in def_pix_NeighMap.items():
-            break
+        # -------------- Keep only mapping for defect pixels -----------------
+        NeighMap = {pix : NeighMap[pix] for pix in DefPix_idx}
+        
+        # -------------- Construct the finale DeadPixelMask ------------------
+        DeadPixelMask = {}
+        
+        # Compare the mapping to the mask given for each defect pixel
+        for i in range(nr_def_pix):
+            
+            pix_idx = DefPix_idx[i]                 # index of dead pixel
+            pix_NeighMap = NeighMap[pix_idx]        # dict of all neighbours
+            pix_mask = dead_pix_mask[pix_idx]       # pixel mask from EEPROM
+            
+            # Decode the mask for pixel pix_idx. pix_mask_decoded contains 
+            # positions of bits in pix_mask that are set to 1,
+            # e.g. 129 -> 1000 0001 -> [0,7]
+            pix_mask_decoded = self._decode_DeadPixMask(pix_mask,       # mask from EEPROM
+                                                        pix_idx<_HALF)  # flag indicating if pixel in upper half
+            
+            # Initialize list containing all neighbouring pixels that
+            # are supposed to be used for masking
+            DeadPixelMask[pix_idx] = []
+            
+            # Populate list
+            for pos in pix_mask_decoded:
+                DeadPixelMask[pix_idx].append(pix_NeighMap[pos])
+             
+        print(DeadPixelMask) 
+        return DeadPixelMask
         
         
 
@@ -1059,13 +1086,14 @@ class I2C_HTPA32x32d(I2C_Driver):
         Neighbors are the 8-directional adjacent elements with the following 
         numbering
         
-        8 -----     1     ----- 2
+        7 -----     0     ----- 1
                     
-        7 ----- DeadPixel ----- 3 
+        6 ----- DeadPixel ----- 2 
                     
-        6 -----     5     ----- 4
+        5 -----     4     ----- 3
         
         """
+        
         W = _ROWS
         H = _COLS
         neighbors = {}
@@ -1073,14 +1101,14 @@ class I2C_HTPA32x32d(I2C_Driver):
         for i in range(_COLS * _ROWS):
             row, col = divmod(i, _COLS)
             adjacent = {}
-            if row > 0:                          adjacent[1] = i - W      # 1
-            if row > 0     and col < W - 1:      adjacent[2] = i - W + 1  # 2
-            if col < W - 1:                      adjacent[3] = i + 1      # 3
-            if row < H - 1 and col < W - 1:      adjacent[4] = i + W + 1  # 4
-            if row < H - 1:                      adjacent[5] = i + W      # 5
-            if row < H - 1 and col > 0:          adjacent[6] = i + W - 1  # 6
-            if col > 0:                          adjacent[7] = i - 1      # 7
-            if row > 0     and col > 0:          adjacent[8] = i - W - 1  # 8
+            if row > 0:                          adjacent[0] = i - W      # 0
+            if row > 0     and col < W - 1:      adjacent[1] = i - W + 1  # 1
+            if col < W - 1:                      adjacent[2] = i + 1      # 2
+            if row < H - 1 and col < W - 1:      adjacent[3] = i + W + 1  # 3
+            if row < H - 1:                      adjacent[4] = i + W      # 4
+            if row < H - 1 and col > 0:          adjacent[5] = i + W - 1  # 5
+            if col > 0:                          adjacent[6] = i - 1      # 6
+            if row > 0     and col > 0:          adjacent[7] = i - W - 1  # 7
             
             neighbors[i] = adjacent
         
@@ -1126,7 +1154,29 @@ class I2C_HTPA32x32d(I2C_Driver):
             
         return PixIdx
                 
-                
+    def _decode_DeadPixMask(self,
+                            mask: int,
+                            upper_half: bool) -> list[int]:
+
+        """
+        Decodes an 8-bit mask integer into a list of neighbor indices to use,
+        normalized to upper_half=True positions.
+    
+        upper_half=True  position layout:   upper_half=False position layout:
+          7  0  1                             5  4  3
+          6  X  2                             6  X  2
+          5  4  3                             7  0  1
+        """
+        active = [i for i in range(8) if (mask >> i) & 1]
+    
+        if not upper_half:
+            remap = {0: 4, 1: 3, 2: 2, 3: 1, 4: 0, 5: 7, 6: 6, 7: 5}
+            active = [remap[i] for i in active]
+    
+        return active
+            
+        """
+        return [i for i in range(8) if (mask >> i) & 1]                
         
     
     def load_lut(
