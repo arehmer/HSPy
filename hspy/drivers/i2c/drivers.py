@@ -1109,7 +1109,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         for ro_idx in ReadOutIdx:
             
             # Read-out-order index and pixel index are identical in upper half
-            if ro_idx < _HALF
+            if ro_idx < _HALF:
                 pix_idx = ro_idx
             # In lower half read-out order index counts from bottom to and
             # pixel index counts from top to bottom  
