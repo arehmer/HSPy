@@ -823,7 +823,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         # ------------- 13.1 Pixel Masking ------------------------------------
         for dead_pix, mask in c['dead_pix_sorted'].items():
-            pix_comp[dead_pix] = pix_comp[dead_pix][mask].mean()
+            pix_comp[dead_pix] = pix_comp[mask].mean()
         
         # ------------- Write final value to dict and return ------------------
         data['pix_comp'] = pix_comp
