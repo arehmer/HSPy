@@ -81,7 +81,6 @@ if __name__ == '__main__':
     
     # %% Create instance of i2c driver
     i2c_driver = I2C_HTPA32x32d(bus)
-    i2c_driver.init()
    
     # Load and assign the LuT
     lut154 = LuT()
@@ -105,7 +104,7 @@ if __name__ == '__main__':
             data = self.read_buffer.get()
             print('Frame obtained!')
             return None
-        
+    
     reader_thread = DebugReader(name='reader_thread',
                                 read_buffer = i2c_buffer)
         
