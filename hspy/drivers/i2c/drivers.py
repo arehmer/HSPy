@@ -365,7 +365,8 @@ class I2C_HTPA32x32d(I2C_Driver):
                 
                 if applyCalib:
                     
-                    # Calculcate Temperatures from pixel voltages
+                    # Calculcates Temperatures from pixel voltages given cali-
+                    # bration data from EEPROM
                     data = self.apply_calib(data)
                     
                 if calcdK:
@@ -817,11 +818,15 @@ class I2C_HTPA32x32d(I2C_Driver):
         
             
         data['scale'] = PCSCELEVAL / PixCij   # store for debugging       
-            
-        data['pix_comp'] = V_comp * PCSCELEVAL / PixCij
         
-        # ── Step 6: Replace dead pixels with neighbour average ────────────
-        # self._apply_pixel_masking(results, c)
+        pix_comp = V_comp * PCSCELEVAL / PixCij
+        
+        # ------------- 13.1 Pixel Masking ------------------------------------
+        for dead_pix, mask in self.c['dead_pix_sorted'].items():
+            pix_comp[dead_pix] = pix_comp[dead_pix][mask].mean()
+        
+        # ------------- Write final value to dict and return ------------------
+        data['pix_comp'] = pix_comp
 
         return data
     
@@ -944,22 +949,14 @@ class I2C_HTPA32x32d(I2C_Driver):
         c["dead_pix_adr"]  = u16_arr(_EEP_DEADPIX_ADR, 5)
         c["dead_pix_mask"] = list(self._eeprom_read(_EEP_DEADPIX_MASK, 5))
         
-        print(c["nr_def_pix"] )
-        print(c["dead_pix_adr"] )
-        print(c["dead_pix_mask"] )
+        c['dead_pix_sorted'] = self._determine_dead_pix_neighbors(c["nr_def_pix"],
+                                                                  c["dead_pix_adr"],
+                                                                  c["dead_pix_mask"])
         
-        c['dead_pix_neigh'] = self._determine_dead_pix_neighbors(c["nr_def_pix"],
-                                                                 c["dead_pix_adr"],
-                                                                 c["dead_pix_mask"])
-        
-
         # Per-pixel arrays (1024 entries each)
         c["thgrad"]        = i16_arr(_EEP_THGRAD,   _PIXELS)
         c["thoffset"]      = i16_arr(_EEP_THOFFSET, _PIXELS)
         c["pij"]           = u16_arr(_EEP_PIJ,      _PIXELS)
-        
-        
-        
         
         # Rearrange per-pixel arrays to correspond to actual pixel order
         c["thgrad_arr"] = self._sort_perPixel_calibData(c["thgrad"])
