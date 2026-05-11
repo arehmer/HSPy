@@ -1058,9 +1058,9 @@ class I2C_HTPA32x32d(I2C_Driver):
         for i in range(nr_def_pix):
             
             pix_idx = DefPix_idx[i]                 # index of dead pixel
+            pix_mask = dead_pix_mask[i]             # pixel mask from EEPROM
             pix_NeighMap = NeighMap[pix_idx]        # dict of all neighbours
-            pix_mask = dead_pix_mask[pix_idx]       # pixel mask from EEPROM
-            
+
             # Decode the mask for pixel pix_idx. pix_mask_decoded contains 
             # positions of bits in pix_mask that are set to 1,
             # e.g. 129 -> 1000 0001 -> [0,7]
@@ -1075,7 +1075,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             for pos in pix_mask_decoded:
                 DeadPixelMask[pix_idx].append(pix_NeighMap[pos])
              
-        print(DeadPixelMask) 
+            print(DeadPixelMask[pix_idx]) 
+            
         return DeadPixelMask
         
         
