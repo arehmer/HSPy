@@ -822,7 +822,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         pix_comp = V_comp * PCSCELEVAL / PixCij
         
         # ------------- 13.1 Pixel Masking ------------------------------------
-        for dead_pix, mask in self.c['dead_pix_sorted'].items():
+        for dead_pix, mask in c['dead_pix_sorted'].items():
             pix_comp[dead_pix] = pix_comp[dead_pix][mask].mean()
         
         # ------------- Write final value to dict and return ------------------
@@ -1389,77 +1389,6 @@ class I2C_HTPA32x32d(I2C_Driver):
                 + q21 * (1 - ta_f) * dig_f
                 + q22 * ta_f       * dig_f)
 
-    # ── Private: pixel masking (Section 13.1) ────────────────────────────────
-
-    def _apply_pixel_masking(self, temps: List[float], c: dict) -> None:
-        """
-        Replace dead-pixel temperatures with the average of their nominated
-        neighbours.  Operates in-place on *temps*.
-
-        The neighbour layout from the datasheet (top half):
-          128  1   2
-           64  X   4
-           32  16  8
-        (bottom half layout is vertically mirrored)
-        """
-        nr = c["nr_def_pix"]
-        if nr == 0:
-            return
-
-        # Neighbour (delta_row, delta_col) in bit order [7..0] for top half
-        TOP_OFFSETS = [
-            (-1, -1),  # bit 7 = 128
-            (-1,  0),  # bit 0 = 1
-            (-1, +1),  # bit 1 = 2
-            ( 0, -1),  # bit 6 = 64
-            ( 0, +1),  # bit 2 = 4
-            (+1, -1),  # bit 5 = 32
-            (+1,  0),  # bit 4 = 16
-            (+1, +1),  # bit 3 = 8
-        ]
-        # Bottom half: vertically mirrored
-        BOT_OFFSETS = [
-            (+1, -1),  # bit 7
-            (+1,  0),  # bit 0
-            (+1, +1),  # bit 1
-            ( 0, -1),  # bit 6
-            ( 0, +1),  # bit 2
-            (-1, -1),  # bit 5
-            (-1,  0),  # bit 4
-            (-1, +1),  # bit 3
-        ]
-
-        for i in range(nr):
-            raw_adr  = c["dead_pix_adr"][i]
-            mask_val = c["dead_pix_mask"][i]
-
-            # Convert stored EEPROM address to actual pixel number (Section 13.1)
-            if raw_adr < 0x0200:
-                pix    = raw_adr
-                is_top = True
-            else:
-                # Bottom half: adapted address formula from datasheet
-                col_k = raw_adr % _COLS
-                pix   = 1024 + 512 - raw_adr + col_k * 2 - 32
-                is_top = False
-
-            if not (0 <= pix < _PIXELS):
-                continue
-
-            row     = pix // _COLS
-            col     = pix  % _COLS
-            offsets = TOP_OFFSETS if is_top else BOT_OFFSETS
-
-            neighbour_vals: List[float] = []
-            for bit_pos, (dr, dc) in enumerate(offsets):
-                if mask_val & (1 << (7 - bit_pos)):
-                    nr_ = row + dr
-                    nc_ = col + dc
-                    if 0 <= nr_ < _ROWS and 0 <= nc_ < _COLS:
-                        neighbour_vals.append(temps[nr_ * _COLS + nc_])
-
-            if neighbour_vals:
-                temps[pix] = sum(neighbour_vals) / len(neighbour_vals)
 
     # ── Private: stack buffer helpers ────────────────────────────────────────
 
