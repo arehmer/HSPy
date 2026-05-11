@@ -1174,10 +1174,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             active = [remap[i] for i in active]
     
         return active
-            
-        """
-        return [i for i in range(8) if (mask >> i) & 1]                
-        
+
     
     def load_lut(
         self,
