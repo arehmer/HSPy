@@ -944,6 +944,10 @@ class I2C_HTPA32x32d(I2C_Driver):
         c["dead_pix_adr"]  = u16_arr(_EEP_DEADPIX_ADR, 5)
         c["dead_pix_mask"] = list(self._eeprom_read(_EEP_DEADPIX_MASK, 5))
         
+        print(c["nr_def_pix"] )
+        print(c["dead_pix_adr"] )
+        print(c["dead_pix_mask"] )
+        
         c['dead_pix_neigh'] = self._determine_dead_pix_neighbors(c["nr_def_pix"],
                                                                  c["dead_pix_adr"],
                                                                  c["dead_pix_mask"])
