@@ -1071,9 +1071,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             # Populate list
             for pos in pix_mask_decoded:
                 DeadPixelMask[pix_idx].append(pix_NeighMap[pos])
-             
-            print(DeadPixelMask[pix_idx]) 
-            
+
         return DeadPixelMask
         
         
