@@ -725,10 +725,7 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         """
         
-        
-        
-    
-
+     
     def apply_calib(self, data: dict) -> List[float]:
         """
         Convert a raw frame (from read_frame()) into per-pixel compensated
@@ -942,10 +939,15 @@ class I2C_HTPA32x32d(I2C_Driver):
         c["global_off"]    = i8 (_EEP_GLOBAL_OFF)
         c["global_gain"]   = u16(_EEP_GLOBAL_GAIN)
 
-        # Dead-pixel table
+        # Dead-pixels
         c["nr_def_pix"]    = u8 (_EEP_NR_DEF_PIX)
         c["dead_pix_adr"]  = u16_arr(_EEP_DEADPIX_ADR, 5)
         c["dead_pix_mask"] = list(self._eeprom_read(_EEP_DEADPIX_MASK, 5))
+        
+        c['dead_pix_neigh'] = self._determine_dead_pix_neighbors(c["nr_def_pix"],
+                                                                 c["dead_pix_adr"],
+                                                                 c["dead_pix_mask"])
+        
 
         # Per-pixel arrays (1024 entries each)
         c["thgrad"]        = i16_arr(_EEP_THGRAD,   _PIXELS)
@@ -1006,7 +1008,123 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         # Concatenate and return
         return np.vstack([top,bot]).flatten()
+    
+    def _determine_dead_pix_neighbors(self,
+                                     nr_def_pix:int,
+                                     dead_pix_adr:List[np.uint16],
+                                     dead_pix_mask:List[np.uint16])->dict:
+        """
+        Determines the neighbors of each pixel to be used for masking via 
+        averaging.
 
+        Parameters
+        ----------
+        nr_def_pix : int
+            DESCRIPTION.
+        dead_pix_adr : List[np.uint16]
+            DESCRIPTION.
+        dead_pix_mask : List[np.uint16]
+            DESCRIPTION.
+
+        Returns
+        -------
+        dict
+            DESCRIPTION.
+
+        """
+
+        # ------------- Get Neighbour Mapping for all pixels ------------------
+        NeighMap = self._get_neighbors()
+        
+        # ------- Calculate index of defect pixels from pixel addresses -------
+        DefPix_idx = self._PixAddress_to_PixIdx(dead_pix_adr)
+        
+        # -------------- Keep only mapping for defect pixels -----------------
+        def_pix_NeighMap = {pix : NeighMap[pix] for pix in DefPix_idx}
+        
+        # Within that mapping, keep only those pixels that are listed in 
+        # dead_pix_mask
+        for pix_idx, mask in def_pix_NeighMap.items():
+            break
+        
+        
+
+    def _get_neighbors(self) -> dict[int, list[int]]:
+        """
+        Returns a dict mapping each pixel index to its dict of neighbors.
+        Neighbors are the 8-directional adjacent elements with the following 
+        numbering
+        
+        8 -----     1     ----- 2
+                    
+        7 ----- DeadPixel ----- 3 
+                    
+        6 -----     5     ----- 4
+        
+        """
+        W = _ROWS
+        H = _COLS
+        neighbors = {}
+        
+        for i in range(_COLS * _ROWS):
+            row, col = divmod(i, _COLS)
+            adjacent = {}
+            if row > 0:                          adjacent[1] = i - W      # 1
+            if row > 0     and col < W - 1:      adjacent[2] = i - W + 1  # 2
+            if col < W - 1:                      adjacent[3] = i + 1      # 3
+            if row < H - 1 and col < W - 1:      adjacent[4] = i + W + 1  # 4
+            if row < H - 1:                      adjacent[5] = i + W      # 5
+            if row < H - 1 and col > 0:          adjacent[6] = i + W - 1  # 6
+            if col > 0:                          adjacent[7] = i - 1      # 7
+            if row > 0     and col > 0:          adjacent[8] = i - W - 1  # 8
+            
+            neighbors[i] = adjacent
+        
+        return neighbors
+    
+    def _ReadOutIdx_to_PixIdx(self,
+                              ReadOutIdx:List[np.uint16])->List[int]:
+        """
+        Convert pixel address given in read-out-order 
+
+        Parameters
+        ----------
+        dead_pix_adr : List[np.uint16]
+            DESCRIPTION.
+
+        Returns
+        -------
+        List[int]
+            DESCRIPTION.
+
+        """
+        
+        PixIdx = []
+        
+        # Loop over all pixel addresses (given in read-out-order)
+        for ro_idx in ReadOutIdx:
+            
+            # Read-out-order index and pixel index are identical in upper half
+            if ro_idx < _HALF
+                pix_idx = ro_idx
+            # In lower half read-out order index counts from bottom to and
+            # pixel index counts from top to bottom  
+            else:
+                # Determine row index (counted from bottom) and column index 
+                # (counted from left to right) of pixel at ro_idx
+                row_from_bot,col = divmod(ro_idx-_HALF)
+                
+                # Calculate pixel index pix_idx from that information
+                pix_idx = row_from_bot * _ROWS + col
+                
+            # Convert to uint16
+            PixIdx.append(np.uint16(pix_idx))
+            
+        return PixIdx
+                
+                
+        
+    
     def load_lut(
         self,
         ta_cols: List[float],
