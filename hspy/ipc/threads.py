@@ -311,6 +311,7 @@ class DataRecord(RThread_R1):
         
         # Assign user specified attributes
         self.save_dir = kwargs.pop('save_dir',Path.cwd())                        # Directory to write results and recorded data to
+        print(save_dir)
         self.counter = 0                                                        # File counter, incremented after every write operation
         
         

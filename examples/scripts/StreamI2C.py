@@ -71,6 +71,8 @@ args = arg_parser.parse_args()
 bus = args.bus
 save_dir = args.save_dir
 
+print(save_dir)
+
 # %% Main loop
 if __name__ == '__main__':
     
