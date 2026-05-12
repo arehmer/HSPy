@@ -20,6 +20,7 @@ Recommended external circuit (Section 6):
 
 import struct
 import time
+from datetime import datetime
 from typing import List, Optional
 import smbus2
 import threading
@@ -571,21 +572,10 @@ class I2C_HTPA32x32d(I2C_Driver):
             raw_bytes[block]['bot'] = bot_raw
         
         # ------ Return -------------------------------------------------------       
-        return {'pix':raw_bytes, 't':time.time()}
+        return {'pix':raw_bytes, 't':datetime.now()}
         
-        # # ------ Return -------------------------------------------------------
-        # if measure_vdd:
-        #     return {
-        #         "pix":     pixels,
-        #         "vdd":        vdd,
-        #         "t":          time.time()
-        #     }
-        # else:
-        #     return {
-        #         "pix":     pixels,
-        #         "ptat":       ptat,
-        #         "t":          time.time()
-        #     }
+
+        
         # ── Eletrical Offset Readout ─────────────────────────────────────────────────
     def read_electrical_offsets(self, measure_vdd: bool = False) -> List[int]:
         """
