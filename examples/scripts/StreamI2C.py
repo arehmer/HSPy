@@ -93,7 +93,6 @@ if __name__ == '__main__':
     if save_dir is not None:
         consumer_thread = DataRecord(name = 'record_thread',
                                      read_buffer = i2c_buffer,
-                                     imshow = False,
                                      save_dir = save_dir)
         
     # If no save_dir is specified, create a dummy consumer thread that only
