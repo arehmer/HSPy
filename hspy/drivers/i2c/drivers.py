@@ -422,7 +422,10 @@ class I2C_HTPA32x32d(I2C_Driver):
             
             top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
             bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
-        
+            #---------------------------------
+            data['pix_raw'][block]['top'] = top_int
+            data['pix_raw'][block]['bot'] = bot_int
+            #---------------------------------
             # Word[0] = PTAT (or VDD if active_vdd set)
             if active_vdd:
                 vdd['top'].append(top_int[0])
@@ -452,7 +455,10 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
         bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
-        
+        #---------------------------------
+        data['eloff_raw']['top'] = top_int
+        data['eloff_raw']['bot'] = bot_int
+        #---------------------------------
         if blind_vdd:
             vdd['top'].append(top_int[0])
             vdd['bot'].append(bot_int[0])
