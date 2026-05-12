@@ -376,9 +376,9 @@ class DataRecord(RThread_R1):
 
     def make_filename(self,
                       counter: int,
-                      timestamp: datetime.datetime) -> str:
+                      timestamp: datetime) -> str:
         
-        if not isinstance(timestamp, datetime.datetime):
+        if not isinstance(timestamp, datetime):
             raise TypeError('timestamp is type {type(timestamp)} instead of ' +\
                             'datetime.datetime.')
         if not isinstance(counter,int):
