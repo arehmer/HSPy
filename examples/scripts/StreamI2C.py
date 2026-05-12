@@ -60,7 +60,7 @@ arg_parser.add_argument("--bus",
 
 arg_parser.add_argument("--save_dir",
                         dest = "save_dir",
-                        type=str,
+                        type=Path,
                         required = False,
                         default = None,
                         help="Directory for storing acquired i2c data")
