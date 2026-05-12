@@ -73,9 +73,7 @@ arg_parser.add_argument("--save_dir",
 args = arg_parser.parse_args()
 bus = args.bus
 save_dir = args.save_dir.expanduser()
-
-print(save_dir)
-
+print(f'0: {save_dir}')
 # %% Main loop
 if __name__ == '__main__':
     
@@ -97,6 +95,7 @@ if __name__ == '__main__':
     # If save_dir is specified, create a DataRecord thread, which writes 
     # the aqcuired data to file
     if save_dir is not None:
+        print(f'1: {save_dir}')
         consumer_thread = DataRecord(name = 'record_thread',
                                      read_buffer = i2c_buffer,
                                      save_dir = save_dir)
