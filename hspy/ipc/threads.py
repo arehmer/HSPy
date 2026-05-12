@@ -311,7 +311,7 @@ class DataRecord(RThread_R1):
         
         # Assign user specified attributes
         self.save_dir = kwargs.pop('save_dir',Path.cwd())                        # Directory to write results and recorded data to
-        print(save_dir)
+
         self.counter = 0                                                        # File counter, incremented after every write operation
         
         
@@ -343,6 +343,9 @@ class DataRecord(RThread_R1):
         # rec_dir is named after the date and time of its creation
         formatted_datetime = datetime.now().strftime("%d_%m_%y_%H%M%S")
         self.rec_dir = self.save_dir / formatted_datetime
+        
+        print(self.save_dir)
+        print(self.rec_dir)
         
         # Create rec_dir and all its parents if necessary
         self.rec_dir.mkdir(parents=True,
