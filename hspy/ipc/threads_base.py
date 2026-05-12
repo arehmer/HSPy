@@ -9,6 +9,7 @@ from threading import Thread, Event
 from threading import Condition
 import queue
 from queue import Queue
+import types
 
 class RWThread_R1(Thread):
     """
@@ -292,11 +293,23 @@ class RThread_R1(Thread):
                  read_buffer:Queue,
                  **kwargs):
         
+        # Check input arguments
+        if not isinstance(name,str):
+            raise TypeError(f'name is type {type(name)} instead of {str}.')
+        if not isinstance(read_buffer,Queue):
+            raise TypeError(f'read_buffer is type {type(read_buffer)} instead of {Queue}.')
+        if not isinstance(name,str):
+            raise TypeError(f'self._target is type {type(self._target)} instead of {types.FunctionType}.')
+        
+        # Call __init__ of parent class
         super().__init__(**kwargs,
                          target = self._target)
         
+        # Assign user specified attributes
         self.name = name
         self.read_buffer = read_buffer
+        
+        # Standard attributes
         self._exit = Event()
         self.daemon = True  # dies automatically if main thread exits
         

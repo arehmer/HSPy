@@ -283,7 +283,7 @@ class DummyConsumer(RThread_R1):
                          **kwargs)
     
     def _target(self):
-        data = self.read_buffer.get()
+        _ = self.read_buffer.get()
         print('Frame obtained!')
         return None
 
@@ -296,30 +296,38 @@ class DataRecord(RThread_R1):
     def __init__(self,
                  name:str,
                  read_buffer:Queue,
-                 imshow:bool,
+                 save_dir:Path,
                  **kwargs):
         
-        # Call __init__ of parent class RThread_R1
+        
+        # Check input arguments
+        if not isinstance(save_dir,Path):
+            raise TypeError(f'save_dir is type {type(save_dir)} instead of {Path}.')
+              
+        # Call __init__ of parent class
         super().__init__(name = name,
                          read_buffer = read_buffer,
                          **kwargs)
         
-        # self.imshow = imshow                                                    # Show the sensor stream
-        # self.window_name = kwargs.pop('window_name','Sensor stream')            # Name of the window the stream is shown in
-        
-        
+        # Assign user specified attributes
         self.save_dir = kwargs.pop('save_dir',Path.cwd())                        # Directory to write results and recorded data to
         self.counter = 0                                                        # File counter, incremented after every write operation
         
         
-        # Create a directory within rec_dir to store recorded data
+        # Create a directory within save_dir to store recorded data
         self._init_rec_dir()
-        # self.save_keys = ['bboxes','frame']                                     # Keys of values in the received data that are to be written to files
+       
+        
+       # self.save_keys = ['bboxes','frame']                                     # Keys of values in the received data that are to be written to files
         # self.rec_dir = None                                                     # Directory within save_dir, where recorded data is saved. Created automatically.
         # self.file_path = {}                                                     # Dictionary of file paths
         
         # Set time
         # self.t0 = time.time() 
+        
+        # self.imshow = imshow                                                    # Show the sensor stream
+        # self.window_name = kwargs.pop('window_name','Sensor stream')            # Name of the window the stream is shown in
+        
 
     def _init_rec_dir(self):
         '''
