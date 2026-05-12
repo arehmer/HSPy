@@ -420,8 +420,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             top_raw = data['pix_raw'][block]['top']
             bot_raw = data['pix_raw'][block]['bot']
             
-            top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
-            bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
+            top_int = np.frombuffer(top_raw, dtype='>u2') 
+            bot_int = np.frombuffer(bot_raw, dtype='>u2') 
             #---------------------------------
             data['pix_raw'][block]['top'] = top_int
             data['pix_raw'][block]['bot'] = bot_int
@@ -453,8 +453,8 @@ class I2C_HTPA32x32d(I2C_Driver):
         top_raw = data['eloff_raw']['top']
         bot_raw = data['eloff_raw']['bot']
         
-        top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
-        bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
+        top_int = np.frombuffer(top_raw, dtype='>u2') # 129 words
+        bot_int = np.frombuffer(bot_raw, dtype='>u2') # 129 words
         #---------------------------------
         data['eloff_raw']['top'] = top_int
         data['eloff_raw']['bot'] = bot_int
@@ -576,8 +576,8 @@ class I2C_HTPA32x32d(I2C_Driver):
             # Read frame from register
             top_raw, bot_raw = self._read_both_halves()
             
-            raw_bytes[block]['top'] = top_raw
-            raw_bytes[block]['bot'] = bot_raw
+            raw_bytes[block]['top'] = bytes(top_raw)
+            raw_bytes[block]['bot'] = bytes(bot_raw)
         
         # ------ Return -------------------------------------------------------       
         return {'pix_raw':raw_bytes, 't':datetime.now()}
@@ -615,7 +615,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         # Read frame from register
         top_raw, bot_raw = self._read_both_halves()
                 
-        return {'eloff_raw':{'top':top_raw,'bot':bot_raw}}
+        return {'eloff_raw':{'top':bytes(top_raw),'bot':bytes(bot_raw)}}
         
 
         
