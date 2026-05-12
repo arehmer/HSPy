@@ -416,7 +416,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         # ------------- Convert pixels and vdd/ptat ---------------------------
         
-        for block in range(len(data['pix'])):
+        for block in range(len(data['pix_raw'])):
             top_raw = data['pix_raw'][block]['top']
             bot_raw = data['pix_raw'][block]['bot']
             
