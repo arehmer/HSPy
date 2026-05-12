@@ -34,6 +34,9 @@ Broadcast address used to detect HTPA devices on the network.
 This script follows standard Python CLI practices, using argparse for argument
 parsing and conventional object/thread lifecycle management.
 """
+
+print('Loading libraries...')
+
 from queue import Queue
 import time
 from pathlib import Path
@@ -76,6 +79,7 @@ print(save_dir)
 # %% Main loop
 if __name__ == '__main__':
     
+    print('Initializing objects...')
     # %% Create instance of i2c driver
     i2c_driver = I2C_HTPA32x32d(bus)
    
@@ -105,16 +109,17 @@ if __name__ == '__main__':
     
 
         
-    # Assign i2c_buffer to i2c_driver
+    # Start threads
+    print('Starting threads...')
     i2c_driver.start_i2cstream()
     consumer_thread.start()
     
     # Let threads run 20 seconds
-    time.sleep(20)
+    time.sleep(5)
     
     # # Stop the threads in reversed order!
+    print('Shutting down threads...')
     consumer_thread.stop()
     i2c_driver.stop_i2cstream()
 
-    # print('End')
         
