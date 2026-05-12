@@ -34,24 +34,17 @@ Broadcast address used to detect HTPA devices on the network.
 This script follows standard Python CLI practices, using argparse for argument
 parsing and conventional object/thread lifecycle management.
 """
-
-
-import pickle as pkl
 from queue import Queue
 import time
 from pathlib import Path
 import argparse  
 
-from hspytools.readers import HTPA_UDPReader
-from hspytools.tparray import TPArray
-from hspytools.ipc.threads import UDP,Imshow
 from hspytools.ipc.threads_base import RThread_R1
+from hspy.ipc.threads import DataRecord, DummyConsumer
 from hspy.drivers.i2c import I2C_HTPA32x32d
 from hspy.LuT import LuT
 
 # from hspytools.ipc.threads import UDP, Record_Thread, FileWriter_Thread
-
-from threading import Condition
 
 # %% Create an argument parser to enable passing argument from the
 # command line to this script
@@ -65,16 +58,18 @@ arg_parser.add_argument("--bus",
                         required=True,
                         help="I2C bus that HTPA device is connected to.")
 
-# arg_parser.add_argument("--no-imshow",
-#                         dest = "imshow",
-#                         action="store_false",
-#                         required = False,
-#                         help="Flag disabling cv2.imshow()")
+arg_parser.add_argument("--save_dir",
+                        dest = "save_dir",
+                        type=str,
+                        required = False,
+                        default = None,
+                        help="Directory for storing acquired i2c data")
 
 
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
+save_dir = args.save_dir
 
 # %% Main loop
 if __name__ == '__main__':
@@ -90,34 +85,34 @@ if __name__ == '__main__':
     
     # Create and set buffer for i2c data
     i2c_buffer = Queue(maxsize=1)
-    
     i2c_driver.output_queue = i2c_buffer
     
     
-    # Create simple consumer thread to empty the i2c_buffer and prevent blocking
-    class DebugReader(RThread_R1):
+    # If save_dir is specified, create a DataRecord thread, which writes 
+    # the aqcuired data to file
+    if save_dir is not None:
+        consumer_thread = DataRecord(name = 'record_thread',
+                                     read_buffer = i2c_buffer,
+                                     imshow = False,
+                                     save_dir = save_dir)
         
-        def __init__(self,**kwargs):
-            super().__init__(**kwargs)
-        
-        def _target(self):
-            data = self.read_buffer.get()
-            print('Frame obtained!')
-            return None
+    # If no save_dir is specified, create a dummy consumer thread that only
+    # clears the i2c buffer to keep it from blocking
+    else:
+        consumer_thread = DummyConsumer(name = 'record_thread',
+                                        read_buffer = i2c_buffer)
     
-    reader_thread = DebugReader(name='reader_thread',
-                                read_buffer = i2c_buffer)
+
         
     # Assign i2c_buffer to i2c_driver
-    
     i2c_driver.start_i2cstream()
-    reader_thread.start()
+    consumer_thread.start()
     
     # Let threads run 20 seconds
     time.sleep(20)
     
     # # Stop the threads in reversed order!
-    reader_thread.stop()
+    consumer_thread.stop()
     i2c_driver.stop_i2cstream()
 
     # print('End')
