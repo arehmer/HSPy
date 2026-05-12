@@ -389,7 +389,7 @@ class I2C_HTPA32x32d(I2C_Driver):
                 print(f"[processing_thread] {e}")                
     
     def convert_i2c_data(self,
-                         raw_bytes:dict, 
+                         data:dict, 
                          active_vdd:bool,
                          blind_vdd:bool):
         
@@ -416,9 +416,9 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         # ------------- Convert pixels and vdd/ptat ---------------------------
         
-        for block in range(len(raw_bytes['pix'])):
-            top_raw = raw_bytes['pix'][block]['top']
-            bot_raw = raw_bytes['pix'][block]['bot']
+        for block in range(len(data['pix'])):
+            top_raw = data['pix_raw'][block]['top']
+            bot_raw = data['pix_raw'][block]['bot']
             
             top_int = np.frombuffer(bytes(top_raw), dtype='>u2') 
             bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') 
@@ -447,8 +447,8 @@ class I2C_HTPA32x32d(I2C_Driver):
                 pix_array[(-block-1)*n_blocks:-block*n_blocks,:] = pixels_bot
                
         # ----------- Convert electrical offsets and vdd/ptat -----------------
-        top_raw = raw_bytes['eloff']['top']
-        bot_raw = raw_bytes['eloff']['bot']
+        top_raw = data['eloff_raw']['top']
+        bot_raw = data['eloff_raw']['bot']
         
         top_int = np.frombuffer(bytes(top_raw), dtype='>u2') # 129 words
         bot_int = np.frombuffer(bytes(bot_raw), dtype='>u2') # 129 words
@@ -473,12 +473,14 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         ptat_array[0] = np.array(ptat['top']).mean().flatten()[0]
         ptat_array[1] = np.array(ptat['bot']).mean().flatten()[0]
-                
-        return {'pix'   : pix_array.flatten(),
-                'eloff' : eloff_array.flatten(),
-                'ptat'  : ptat_array.flatten(),
-                'vdd'   : vdd_array.flatten()        ,
-                't'     : raw_bytes['t']}
+        
+        # ------------- Append onverted data to dict and return --------------  
+        data['pix'] = pix_array.flatten()
+        data['eloff'] = eloff_array.flatten()
+        data['ptat'] = ptat_array.flatten()
+        data['vdd'] = vdd_array.flatten()
+        
+        return data
     
     # ── Continuous frame readout  ────────────────────────────────────────────
     def start_i2cstream(self):
@@ -572,7 +574,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             raw_bytes[block]['bot'] = bot_raw
         
         # ------ Return -------------------------------------------------------       
-        return {'pix':raw_bytes, 't':datetime.now()}
+        return {'pix_raw':raw_bytes, 't':datetime.now()}
         
 
         
@@ -607,7 +609,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         # Read frame from register
         top_raw, bot_raw = self._read_both_halves()
                 
-        return {'eloff':{'top':top_raw,'bot':bot_raw}}
+        return {'eloff_raw':{'top':top_raw,'bot':bot_raw}}
         
 
         
