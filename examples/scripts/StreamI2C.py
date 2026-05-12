@@ -72,7 +72,7 @@ arg_parser.add_argument("--save_dir",
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
-save_dir = args.save_dir
+save_dir = args.save_dir.expanduser()
 
 print(save_dir)
 
