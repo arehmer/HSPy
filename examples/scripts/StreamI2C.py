@@ -42,7 +42,6 @@ import time
 from pathlib import Path
 import argparse  
 
-from hspytools.ipc.threads_base import RThread_R1
 from hspy.ipc.threads import DataRecord, DummyConsumer
 from hspy.drivers.i2c import I2C_HTPA32x32d
 from hspy.LuT import LuT
@@ -115,7 +114,7 @@ if __name__ == '__main__':
     # Let threads run 20 seconds
     time.sleep(5)
     
-    # # Stop the threads in reversed order!
+    # Stop the threads in reversed order!
     print('Shutting down threads...')
     consumer_thread.stop()
     i2c_driver.stop_i2cstream()
