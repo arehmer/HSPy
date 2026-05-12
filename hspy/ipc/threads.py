@@ -375,7 +375,7 @@ class DataRecord(RThread_R1):
         
         # Pickle data in specified directory
         with open(self.rec_dir / filename, "wb") as f:
-            pkl.dump(data, f, protocol=pkl.HIGHEST_PROTOCOL)
+            pkl.dump(data, f)
             
         # Increment counter
         self.counter += 1
