@@ -21,7 +21,7 @@ Recommended external circuit (Section 6):
 import struct
 import time
 from typing import List, Optional
-import smbus2
+# import smbus2
 # ---------------------------------------------------------------------------
 # Attempt to import smbus2; fall back to a stub so the module can be imported
 # on non-Linux hosts for testing / offline use.
