@@ -11,4 +11,10 @@ setup(
     author_email="Name@domain.com",
     install_requires=requirements,
     packages=find_packages(), # package = any folder with an __init__.py file
+    package_data = {
+        'hspy': [
+            'arraytypes/*.json'
+        ]
+    },
+    include_package_data = True
 )

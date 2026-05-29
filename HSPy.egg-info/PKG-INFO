@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: HSPy
+Version: 1.0.0
+Summary: A simple package.
+Author: Name
+Author-email: Name@domain.com
+Requires-Dist: pandas>=2.2.2
+Requires-Dist: smbus2
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: scipy<2.0.0
+Requires-Dist: scikit-learn
+Requires-Dist: openpyxl
+Requires-Dist: mcap
+Requires-Dist: tables
+Requires-Dist: h5py
+Dynamic: author
+Dynamic: author-email
+Dynamic: requires-dist
+Dynamic: summary

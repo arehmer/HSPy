@@ -1,0 +1,10 @@
+pandas>=2.2.2
+smbus2
+numpy
+matplotlib
+scipy<2.0.0
+scikit-learn
+openpyxl
+mcap
+tables
+h5py

@@ -1,0 +1,9 @@
+h5py
+matplotlib
+numpy
+opencv_python
+openpyxl
+pandas
+scikit_learn
+scipy
+smbus2

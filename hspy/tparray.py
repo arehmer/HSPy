@@ -460,6 +460,7 @@ class TPArray():
                                 ArrayTypes['HTPA120x84dR2']]:
             self.DevConst['NROFATC']=0
             self.DevConst['NROFBLOCKS']=6
+            self.DevConst['NROFPTAT'] = 2
 
             self._package_num = 17
             self._package_size = 1401
@@ -619,7 +620,7 @@ class TPArray():
         return self._DevConst
     
     def get_serial_data_order(self):
-        return self._serial_data_order
+        return self.DataCols.all() 
         
     def get_eeprom_adresses(self):
         return self._eeprom_adresses
