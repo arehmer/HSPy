@@ -4,8 +4,6 @@ Created on Thu Feb  8 16:13:39 2024
 
 @author: rehmer
 """
-import os
-
 import time
 import cv2
 
@@ -17,17 +15,17 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import pickle as pkl
-import csv
 
-from hspytools.ipc.threads_base import WThread,RThread, RWThread, RThread_R1
+
+from hspytools.ipc.threads_base import WThread,RThread, RWThread
 from hspytools.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 
-from hspy.drivers.i2c import I2C_Driver
-
 from collections import deque
 
-
+from hspytools.ipc.threads_base import WThread,RThread, RThread_R1
+from hspytools.readers import HTPA_UDPReader
+from hspytools.tparray import TPArray
 
 class UDP(WThread):
     """

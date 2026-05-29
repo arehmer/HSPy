@@ -46,7 +46,7 @@ ArrayTypes = {'HTPA8x8' : 0,
               'HTPA106x52' : 8,
               'HTPA82x62' : 9,
               'HTPA32x32d' : 10,
-              'HTPA32x32dR2' : 10, 
+               'HTPA32x32dR2' : 10, 
               'HTPA80x64d'	: 11,
               'HTPA120x84d' : 12,
               'HTPA84x60d' :	13,
@@ -224,6 +224,7 @@ class TPArray():
         elif (self.SensorType == SensorTypes['HTPA32x32dR2_L1k7_0k8']):
             self.ArrayType = ArrayTypes['HTPA32x32dR2']
             self._NETD = 152 # from datasheet   
+            self.FocalLength = 1.7  # mm
         elif (self.SensorType == SensorTypes['HTPA32x32dR2_L1k7_0k8_THiC_Si']):
             self.ArrayType = ArrayTypes['HTPA32x32dR2']
         elif self.SensorType is None:
@@ -246,6 +247,7 @@ class TPArray():
         elif (self.ArrayType == ArrayTypes['HTPA32x32d']):
             self.width = 32
             self.height = 32
+            self.pixpitch = 90 # µm
             self.DesignGen = 0
             self.UDP_PackageIndex = 0
         elif (self.ArrayType == ArrayTypes['HTPA80x64d']):
