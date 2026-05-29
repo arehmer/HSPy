@@ -4,8 +4,6 @@ Created on Thu Feb  8 16:13:39 2024
 
 @author: rehmer
 """
-import os
-
 import time
 import cv2
 
@@ -17,7 +15,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import pickle as pkl
-import csv
+
 
 from hspytools.ipc.threads_base import WThread,RThread, RWThread
 from hspytools.readers import HTPA_UDPReader
@@ -25,11 +23,13 @@ from hspytools.tparray import TPArray
 
 from collections import deque
 
-
+from hspytools.ipc.threads_base import WThread,RThread, RThread_R1
+from hspytools.readers import HTPA_UDPReader
+from hspytools.tparray import TPArray
 
 class UDP(WThread):
     """
-    Class for running HTPA_UDP_Reader in a thread. Can only bind on device
+    Class for running HTPA_UDP_Reader in a thread. Can only bind one device
     at this point
     """
     
@@ -135,8 +135,7 @@ class UDP(WThread):
         self.udp_reader.stop_continuous_bytestream(DevID = self.DevID)
         
         # Release the array
-        self.udp_reader.release_tparray(self.DevID)
-        
+        self.udp_reader.release_tparray(self.DevID)     
         
 class Imshow(RThread):
     """
@@ -270,52 +269,84 @@ class Imshow(RThread):
         self._exit = True
 
 
-class Record_Thread(RWThread):
+class DummyConsumer(RThread_R1):
+    
+    def __init__(self,
+                 name:str,
+                 read_buffer:Queue,
+                 **kwargs):
+        
+        super().__init__(name=name,
+                         read_buffer = read_buffer,
+                         **kwargs)
+    
+    def _target(self):
+        _ = self.read_buffer.get()
+        print('Frame obtained!')
+        return None
+
+class DataRecord(RThread_R1):
     """
     Class for writing a stream of frames along with possible bounding
     boxes in a thread.
     """
     
     def __init__(self,
-                 width:int,
-                 height:int,
+                 name:str,
                  read_buffer:Queue,
-                 read_condition:Condition,
-                 write_buffer:Queue,
-                 write_condition:Condition,
-                 n_pre_record:int,
-                 imshow:bool,
+                 save_dir:Path,
                  **kwargs):
         
-        self.tparray = TPArray(width = width, height = height)                  # Array type
         
-        self.n_pre_record = n_pre_record                                        # Number of pre-record items
-        self.pre_record_buffer = deque(maxlen=n_pre_record)                     # Buffer for pre-record data
+        # Check input arguments
+        if not isinstance(save_dir,Path):
+            raise TypeError(f'save_dir is type {type(save_dir)} instead of {Path}.')
+              
+        # Call __init__ of parent class
+        super().__init__(name = name,
+                         read_buffer = read_buffer,
+                         **kwargs)
         
-        self.imshow = imshow                                                    # Show the sensor stream
-        self.window_name = kwargs.pop('window_name','Sensor stream')            # Name of the window the stream is shown in
+        # Assign user specified attributes
+        self.save_dir = save_dir                                                # Directory to write results and recorded data to
+        self.counter = 0                                                        # File counter, incremented after every write operation
         
-        self.recording = False                                                  # Flag to check if recording is active
-        self.recorded_data = []                                                 # Store recorded data
-        self.recorded_sets = []
         
-        self.save_dir = kwargs.pop('save_dir',Path.cwd())                       # Directory to write results and recorded data to
-        self.save_keys = ['bboxes','frame']                                     # Keys of values in the received data that are to be written to files
-        self.rec_dir = None                                                     # Directory within save_dir, where recorded data is saved. Created automatically.
-        self.file_path = {}                                                     # Dictionary of file paths
+        # Create a directory within save_dir to store recorded data
+        self._init_rec_dir()
+       
+        
+       # self.save_keys = ['bboxes','frame']                                     # Keys of values in the received data that are to be written to files
+        # self.rec_dir = None                                                     # Directory within save_dir, where recorded data is saved. Created automatically.
+        # self.file_path = {}                                                     # Dictionary of file paths
         
         # Set time
-        self.t0 = time.time() 
+        # self.t0 = time.time() 
         
-        # Call parent class
-        super().__init__(target = self._target_function,
-                         read_buffer = read_buffer,
-                         read_condition = read_condition,
-                         write_buffer = write_buffer,
-                         write_condition = write_condition,
-                         **kwargs)
-    
-    def _target_function(self):
+        # self.imshow = imshow                                                    # Show the sensor stream
+        # self.window_name = kwargs.pop('window_name','Sensor stream')            # Name of the window the stream is shown in
+        
+
+    def _init_rec_dir(self):
+        '''
+        Create a folder within save_dir, in which the recorded data is stored.
+        The create directory is stored as class attribute rec_dir.
+        Returns
+        -------
+        None.
+
+        '''
+
+        # rec_dir is named after the date and time of its creation
+        formatted_datetime = datetime.now().strftime("%d_%m_%y_%H%M%S")
+        self.rec_dir = self.save_dir / formatted_datetime
+        
+        # Create rec_dir and all its parents if necessary
+        self.rec_dir.mkdir(parents=True,
+                           exist_ok=True)
+        
+   
+    def _target(self):
         """
         Gets result from upstream thread. Optionally converts the frame to a
         plotable format.
@@ -328,303 +359,227 @@ class Record_Thread(RWThread):
         """
         
         # Get result from upstream thread
-        result = self.read_buffer.get()
+        data = self.read_buffer.get()
         
-        # Check success flag of upstream thread
-        if result['success'] is True:
-            
-            if self.imshow == True:
-                
-                frame = result['frame_proc'].copy()
-        
-                # Reshape if not the proper size
-                if frame.ndim == 1:
-                    frame = frame[0:self.num_pix]
-                    frame = frame.reshape(self.tparray._npsize)
-                     
-                # convert to opencv type
-                frame = cv2.normalize(frame,frame,0,255,cv2.NORM_MINMAX)
-                frame = frame.astype(np.uint8)
-                
-                # Save to dict
-                result['frame_plot'] = frame 
-        
+        # Acquire timestamp from data, if existing
+        if 't' in data.keys():
+            timestamp = data['t']
         else:
-            # If upstream thread failed, set success flag to False
-            result['success'] = False
+            timestamp = datetime.now()
         
-        return result
-    
-    def _start_condition(self,data:dict):
-        '''
-        Checks if tracks or bounding boxes containing persons exist
-
-        Parameters
-        ----------
-        data : dict
-            Dictionary containing data from upstream threads. It needs to 
-            contain a key 'bboxes' with a DataFrame containing bounding
-            boxes as value.
-
-        Returns
-        -------
-        None.
-
-        '''
+        # Make a filename
+        filename = self.make_filename(self.counter,
+                                      timestamp)
         
-        # Set start flag to False as default
-        start = False
-        
-        # Check if tracks with detected persons exist
-        if 'bboxes' in data.keys():
-            if len(data['bboxes'])!=0:
-                start = True
-        
-        return start
-    
-    def _stop_condition(self,data:dict):
-        """
-        
-        Checks if tracks or bounding boxes containing persons exist
-
-        Parameters
-        ----------
-        data : dict
-            Dictionary containing data from upstream threads. It needs to 
-            contain a key 'bboxes' with a DataFrame containing bounding
-            boxes as value.
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        # Set start flag to False as default
-        stop = False
-        
-        # Check if tracks with detected persons exist
-        if 'bboxes' in data.keys():
-            if len(data['bboxes'])==0:
-                stop = True
-        
-        return stop
-        
-    def run(self):
-        """
-        Function that it executed in the thread.
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        # Open a cv namedWindow if specified
-        if self.imshow == True:
-            cv2.namedWindow(self.window_name,
-                            cv2.WINDOW_NORMAL)
-        
-        # Check if thread has been stopped
-        while self._exit == False:
+        # Pickle data in specified directory
+        with open(self.rec_dir / filename, "wb") as f:
+            pkl.dump(data, f)
             
-            # Acquire the read condition
-            with self.read_condition:
+        # Increment counter
+        self.counter += 1
+        
+        return None
 
-                # Wait until the upstream thread notifies this thread
-                while self.read_buffer.empty():
-                    self.read_condition.wait()    
+    def make_filename(self,
+                      counter: int,
+                      timestamp: datetime) -> str:
+        
+        if not isinstance(timestamp, datetime):
+            raise TypeError('timestamp is type {type(timestamp)} instead of ' +\
+                            'datetime.datetime.')
+        if not isinstance(counter,int):
+            raise TypeError('counter is type {type(counter)} instead of int.')
+        
+        # Convert datetime.datetime to string
+        ts = timestamp.strftime("%Y%m%d_%H%M%S_%f")  # %f = microseconds
+        
+        return f"{counter:06d}_{ts}.pkl"
+            
+    # def run(self):
+    #     """
+    #     Function that it executed in the thread.
 
-                # Execute target function to get data from upstream thread
-                data = self._target()
+    #     Returns
+    #     -------
+    #     None.
+
+    #     """
+        
+    #     # Open a cv namedWindow if specified
+    #     if self.imshow == True:
+    #         cv2.namedWindow(self.window_name,
+    #                         cv2.WINDOW_NORMAL)
+        
+    #     # Check if thread has been stopped
+    #     while self._exit == False:
+            
+    #         # Acquire the read condition
+    #         with self.read_condition:
+
+    #             # Wait until the upstream thread notifies this thread
+    #             while self.read_buffer.empty():
+    #                 self.read_condition.wait()    
+
+    #             # Execute target function to get data from upstream thread
+    #             data = self._target()
                                
-                ############ Plotting part  ###################################
-                if (data['success'] == True) and (self.imshow == True):
+    #             ############ Plotting part  ###################################
+    #             if (data['success'] == True) and (self.imshow == True):
                     
-                    # Get frame (processed)
-                    frame = data['frame_plot']
+    #                 # Get frame (processed)
+    #                 frame = data['frame_plot']
                     
-                    # Get bboxes if available
-                    if 'bboxes' in data.keys():
+    #                 # Get bboxes if available
+    #                 if 'bboxes' in data.keys():
                         
-                        import pickle as pkl
+    #                     import pickle as pkl
                         
-                        bboxes = data['bboxes']
+    #                     bboxes = data['bboxes']
                         
-                        # Draw bounding boxes
-                        for b in bboxes.index:
+    #                     # Draw bounding boxes
+    #                     for b in bboxes.index:
                             
-                            box = bboxes.loc[[b]]
+    #                         box = bboxes.loc[[b]]
                             
-                            x,y = int(box['xtl']),int(box['ytl']),
-                            w = int(box['xbr'] - box['xtl'])
-                            h = int(box['ybr'] - box['ytl'])
+    #                         x,y = int(box['xtl']),int(box['ytl']),
+    #                         w = int(box['xbr'] - box['xtl'])
+    #                         h = int(box['ybr'] - box['ytl'])
                             
 
-                            frame = cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0) ,1)
+    #                         frame = cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0) ,1)
                     
-                    cv2.imshow(self.window_name,frame)
-                    cv2.waitKey(1)
+    #                 cv2.imshow(self.window_name,frame)
+    #                 cv2.waitKey(1)
         
-                ############ Recording part #######################################
-                # Check if we're currently recording
-                if not self.recording:
+    #             ############ Recording part #######################################
+    #             # Check if we're currently recording
+    #             if not self.recording:
     
-                    # Before recording, keep buffering the incoming data
-                    self.pre_record_buffer.append(data)
+    #                 # Before recording, keep buffering the incoming data
+    #                 self.pre_record_buffer.append(data)
     
-                    # Check the start condition
-                    if self._start_condition(data):
+    #                 # Check the start condition
+    #                 if self._start_condition(data):
                         
-                        # Once the starting condition is met, initialize
-                        # a new folder and files in it to write to
-                        self._initialize_recording_directory()
+    #                     # Once the starting condition is met, initialize
+    #                     # a new folder and files in it to write to
+    #                     self._initialize_recording_directory()
                         
-                        # Write the pre-buffered data to the created files
-                        self._write_data_to_files(self.pre_record_buffer)
+    #                     # Write the pre-buffered data to the created files
+    #                     self._write_data_to_files(self.pre_record_buffer)
                         
-                        # Clear the pre-recorded buffer
-                        self.pre_record_buffer.clear()  
+    #                     # Clear the pre-recorded buffer
+    #                     self.pre_record_buffer.clear()  
                         
-                        # Set recording flag
-                        self.recording = True
+    #                     # Set recording flag
+    #                     self.recording = True
                         
-                        print("Recording started at frame " + str(data['image_id']) + \
-                              ". Pre-recorded data included.")
+    #                     print("Recording started at frame " + str(data['image_id']) + \
+    #                           ". Pre-recorded data included.")
     
                         
-                else:
+    #             else:
     
-                    # During recording, write new data to file immediately
-                    self._write_data_to_files([data])
+    #                 # During recording, write new data to file immediately
+    #                 self._write_data_to_files([data])
                     
-                    # self.recorded_data.append(data)
+    #                 # self.recorded_data.append(data)
     
-                    # Check if the stop condition is met
-                    if self._stop_condition(data):
+    #                 # Check if the stop condition is met
+    #                 if self._stop_condition(data):
                         
-                        # If so, unset recording flag
-                        print("Recording stopped.")
-                        self.recording = False
+    #                     # If so, unset recording flag
+    #                     print("Recording stopped.")
+    #                     self.recording = False
                         
-                        # Inform the downstream thread that recorded data is available
-                        # Acquire the write condition
-                        with self.write_condition:
+    #                     # Inform the downstream thread that recorded data is available
+    #                     # Acquire the write condition
+    #                     with self.write_condition:
                             
-                            # Write result to buffer
-                            self.write_buffer.put({'rec_dir':self.rec_dir})
+    #                         # Write result to buffer
+    #                         self.write_buffer.put({'rec_dir':self.rec_dir})
                             
-                            # Notify the downstream thread, that item has been 
-                            # placed in the write buffer
-                            self.write_condition.notify()
+    #                         # Notify the downstream thread, that item has been 
+    #                         # placed in the write buffer
+    #                         self.write_condition.notify()
                         
-                        # Reset some class attributes
-                        self.rec_dir = None
-                        self.file_path = {}
+    #                     # Reset some class attributes
+    #                     self.rec_dir = None
+    #                     self.file_path = {}
                         
-                # Notify the upstream thread, that the item has been retrieved
-                # from the buffer and processed
-                self.read_condition.notify()
+    #             # Notify the upstream thread, that the item has been retrieved
+    #             # from the buffer and processed
+    #             self.read_condition.notify()
         
-        # If thread was stopped during recording, put the current data in the
-        # write buffer and destroy the cv window if it exists
-        if self._exit == True:
+    #     # If thread was stopped during recording, put the current data in the
+    #     # write buffer and destroy the cv window if it exists
+    #     if self._exit == True:
             
-            if self.recording == True:
-                self.write_buffer.put(self.recorded_data) 
-                self.recorded_data = []
+    #         if self.recording == True:
+    #             self.write_buffer.put(self.recorded_data) 
+    #             self.recorded_data = []
             
-            if self.imshow == True:
-                cv2.destroyWindow(self.window_name)
+    #         if self.imshow == True:
+    #             cv2.destroyWindow(self.window_name)
     
-    def _initialize_recording_directory(self):
-        '''
-        Creates a folder in the specified save directory based on the current
-        datetime and the ID of the sensor the data is coming from.
 
-        Returns
-        -------
-        None.
-
-        '''
-        # Create a folder to write recorded data to
-        current_datetime = datetime.now()
-        formatted_datetime = current_datetime.strftime("%d_%m_%y_%H%M%S")
-        DevID = self.pre_record_buffer[-1]['DevID']
-        self.rec_dir = self.save_dir / (formatted_datetime + '_' + str(DevID))
-        
-        self.rec_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Within that folder, create a file for each entry in the data-dict
-        # that is to be written to file
-        self.file_path = {}
-        for key in self.save_keys:
-            # Save data path as attribute
-            self.file_path[key] = self.rec_dir / (key+".txt")
-            
-            # Use touch to create the file, if it doesn't exist
-            self.file_path[key].touch()
     
-    def _write_data_to_files(self,data:list):
-        """
-        Writes the values of specified keys (self.save_keys) to corresponding
-        files. 
+    # def _write_data_to_files(self,data:list):
+    #     """
+    #     Writes the values of specified keys (self.save_keys) to corresponding
+    #     files. 
 
-        Parameters
-        ----------
-        data : list or iterable
-            A list containing dictionaries.
+    #     Parameters
+    #     ----------
+    #     data : list or iterable
+    #         A list containing dictionaries.
 
-        Returns
-        -------
-        None.
+    #     Returns
+    #     -------
+    #     None.
 
-        """
+    #     """
         
-        # Loop through the iterable containing the data packages as dicts
-        for data_dict in data:
+    #     # Loop through the iterable containing the data packages as dicts
+    #     for data_dict in data:
             
-            # Loop over keys to write to file
-            for key in self.save_keys:
+    #         # Loop over keys to write to file
+    #         for key in self.save_keys:
                 
-                # Check if key is in data dict
-                if key in data_dict:
+    #             # Check if key is in data dict
+    #             if key in data_dict:
                     
-                    # Check if corresponding file is empty
-                    file_empty = os.path.getsize(self.file_path[key]) == 0
+    #                 # Check if corresponding file is empty
+    #                 file_empty = os.path.getsize(self.file_path[key]) == 0
                             
-                    # Parse values behind keys to a header and a numpy array
-                    if key == 'bboxes':
+    #                 # Parse values behind keys to a header and a numpy array
+    #                 if key == 'bboxes':
                         
-                        values = data_dict[key].values.flatten()
-                        header = list(data_dict[key].columns)
+    #                     values = data_dict[key].values.flatten()
+    #                     header = list(data_dict[key].columns)
                         
-                    if key == 'frame':
+    #                 if key == 'frame':
                         
-                        # Frame is in the format of a numpy array and needs to 
-                        # be parsed to a pandas DataFrame
-                        values = data_dict[key]
-                        header = self.tparray.get_serial_data_order()
+    #                     # Frame is in the format of a numpy array and needs to 
+    #                     # be parsed to a pandas DataFrame
+    #                     values = data_dict[key]
+    #                     header = self.tparray.get_serial_data_order()
                     
-                    # If file was empty, write a header first
-                    if file_empty:
+    #                 # If file was empty, write a header first
+    #                 if file_empty:
                         
-                        with open(self.file_path[key],'w',newline='') as file:
-                            writer = csv.writer(file)
-                            writer.writerow(header)
+    #                     with open(self.file_path[key],'w',newline='') as file:
+    #                         writer = csv.writer(file)
+    #                         writer.writerow(header)
 
                     
-                    # In any case write values to file
-                    if len(values)!=0:
-                        with open(self.file_path[key],'a',newline='') as file:
-                            writer = csv.writer(file)
-                            writer.writerow(values)
-               
-    
-    def stop(self):
-        self._exit = True
-            
-class EMACounting_Thread(RThread):
+    #                 # In any case write values to file
+    #                 if len(values)!=0:
+    #                     with open(self.file_path[key],'a',newline='') as file:
+    #                         writer = csv.writer(file)
+    #                         writer.writerow(values)
+
+class EMACounting_Thread(RThread_R1):
     """
     Thread that counts the number of confirmed tracks per frame, and returns
     an exponential moving average (EMA) of that number via
@@ -639,8 +594,8 @@ class EMACounting_Thread(RThread):
     Useful for counting the number of detected objects, e.g. persons, over time.
     """
     def __init__(self,
+                 name : str,
                  read_buffer:Queue,
-                 read_condition:Condition,
                  **kwargs):
         
         # self.T0 = T0                      # Desired time constant of EMA filter in seconds
@@ -657,9 +612,8 @@ class EMACounting_Thread(RThread):
         # self.dT_samples = []              # List of samples to estimate dT from
         
         # Call constructor of parent class
-        super(EMACounting_Thread,self).__init__(target = self._target_function,
+        super(EMACounting_Thread,self).__init__(name = name,
                                                 read_buffer = read_buffer,
-                                                read_condition = read_condition,
                                                 **kwargs)
         
     @property
@@ -698,7 +652,7 @@ class EMACounting_Thread(RThread):
         self._k = k
         
         
-    def _target_function(self):
+    def _target(self):
         
         
         # # ---------------------------------------------------------------------

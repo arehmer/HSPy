@@ -46,7 +46,7 @@ ArrayTypes = {'HTPA8x8' : 0,
               'HTPA106x52' : 8,
               'HTPA82x62' : 9,
               'HTPA32x32d' : 10,
-              'HTPA32x32dR2' : 10, 
+               'HTPA32x32dR2' : 10, 
               'HTPA80x64d'	: 11,
               'HTPA120x84d' : 12,
               'HTPA84x60d' :	13,
@@ -224,6 +224,7 @@ class TPArray():
         elif (self.SensorType == SensorTypes['HTPA32x32dR2_L1k7_0k8']):
             self.ArrayType = ArrayTypes['HTPA32x32dR2']
             self._NETD = 152 # from datasheet   
+            self.FocalLength = 1.7  # mm
         elif (self.SensorType == SensorTypes['HTPA32x32dR2_L1k7_0k8_THiC_Si']):
             self.ArrayType = ArrayTypes['HTPA32x32dR2']
         elif self.SensorType is None:
@@ -246,6 +247,7 @@ class TPArray():
         elif (self.ArrayType == ArrayTypes['HTPA32x32d']):
             self.width = 32
             self.height = 32
+            self.pixpitch = 90 # µm
             self.DesignGen = 0
             self.UDP_PackageIndex = 0
         elif (self.ArrayType == ArrayTypes['HTPA80x64d']):
@@ -361,7 +363,7 @@ class TPArray():
             
         elif self.ArrayType in [ArrayTypes['HTPA16x16'],
                                 ArrayTypes['HTPA16x16dR3']]:
-            self.DevConst['NROFATC']=0
+            self.DevConst['NROFATC']=2
             self.DevConst['NROFBLOCKS']=2
             self.DevConst['NROFPTAT']=2
             
@@ -373,8 +375,7 @@ class TPArray():
             self.Ampl = 40          #equal for r3  
             
             self._mask = np.ones(self._npsize)
-            
-            print('16x16.json has not yet been tested!')
+
             # path to array data
             path = Path(__file__).parent / 'arraytypes' / '16x16.json'
             # Load calibration data from file
@@ -508,7 +509,11 @@ class TPArray():
             self.DevConst['NROFATC'] = 0
             self.DevConst['NROFPTAT'] = 1
             self.DevConst['NROFBLOCKS'] = 50
-
+            
+            
+            warnings.warn("50x50.json is a copy of 32x32.json. Validate/correct in future!")
+            path = Path(__file__).parent / 'arraytypes' / '50x50.json'
+            self._load_calib_json(path)  
 
         else:
             raise Exception('This Thermopile Array is not known.') 
@@ -679,7 +684,11 @@ class TPArray():
         # Convert all EEPROM values from lists to numpy array
         for key in bcc.keys():
             bcc[key] = np.array(bcc[key]) 
-
+            
+            
+        # Special case for 16x16 Arrays because of different EEPROM 
+        # if self.ArrayType == ArrayTypes['HTPA16x16']
+        
         # Derive calibration settings from raw values
         bcc = self._derive_calib_settings(bcc)
 
@@ -767,6 +776,10 @@ class TPArray():
         https://docs.python.org/3/library/struct.html#struct-format-strings
         """
         
+        if dtype == 'float16':
+            b_idx = np.arange(0,len(raw_val),2)
+            conv_val = [struct.unpack('e',raw_val[b:b+2])[0] for b in  b_idx]
+        
         if dtype == 'float32':
             b_idx = np.arange(0,len(raw_val),4)
             conv_val = [struct.unpack('f',raw_val[b:b+4])[0] for b in  b_idx]
@@ -829,7 +842,7 @@ class TPArray():
             else:
                 REFCAL_user = np.nan        
                 
-        bcc['REFCAL(user)'] = REFCAL_user
+            # bcc['REFCAL(user)'] = REFCAL_user
 
         return bcc
 
@@ -1237,10 +1250,18 @@ class TPArray():
     
     def _calc_Tamb0_4(self,df_meas:pd.Series):
         
-        ''' Sensitivity compensation '''
+        ptat_av = df_meas[self._PTAT].mean()
         
-        raise NotImplementedError('Vdd compensation not implemented '
-                                  'for this htpa device')
+        ptat_grad = self.BCC['ptatGrad']
+        ptat_off = self.BCC['ptatOffset']
+        
+        Tamb0 = ptat_av*ptat_grad+ptat_off
+        
+        dtype = df_meas.loc[self._T_amb].dtypes
+        df_meas.loc[self._T_amb] = Tamb0.astype(dtype)
+        
+        return df_meas
+        
     
     def frame_to_blocks(self,frame:np.ndarray,**kwargs)->dict:
         """

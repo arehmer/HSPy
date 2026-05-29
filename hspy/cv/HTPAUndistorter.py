@@ -47,7 +47,7 @@ class HTPA_Undistorter:
         self._GridDistortion = GridDistortion
         
     def import_GridDistortionData(self,
-                                  GridDistortionData_txt : Path):
+                                  GridDistortionData_txt : Path | pd.DataFrame):
         
         if not isinstance(GridDistortionData_txt,Path):
             raise TypeError('GridDistortionData_txt needs to be a Path object!')
@@ -69,7 +69,7 @@ class HTPA_Undistorter:
         
         GridDistortionData.columns = columns_stripped
         
-        # Check if all exoected columns exist
+        # Check if all expsected columns exist
         expected_columns = ['i', 'j', 'X-Field', 'Y-Field', 'R-Field',
                             'Predicted X', 'Predicted Y', 'Real X', 'Real Y',
                             'Distortion']

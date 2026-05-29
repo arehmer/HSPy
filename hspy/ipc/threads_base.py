@@ -5,11 +5,62 @@ Created on Thu Feb  8 16:12:35 2024
 @author: rehmer
 """
 
-from threading import Thread
+from threading import Thread, Event
 from threading import Condition
+import queue
 from queue import Queue
+import types
 
+class RWThread_R1(Thread):
+    """
+    Base class for a thread that reads from one buffer and writes into another
+    """
+    def __init__(self,
+                 name : str,
+                 read_buffer:Queue,
+                 write_buffer:Queue,
+                 **kwargs):
 
+        super().__init__(target = self._target,
+                         **kwargs)
+        
+        self.name = name
+        self.read_buffer = read_buffer
+        self.write_buffer = write_buffer
+        
+        self._exit = Event()
+
+        
+    
+    def run(self):
+        
+        # Check if thread has been stopped
+        while not self._exit.is_set():
+            
+            try:
+                
+                # Retrieve data
+                data_upstream = self.read_buffer.get(timeout=1.0)  # blocks until data arrives
+                
+                # Process data
+                result = self._target(data_upstream)
+                
+                # Put result into downstream buffer
+                self.write_buffer.put(result)
+                
+            except queue.Empty:
+                continue
+            
+            except Exception as e:
+                print(f"[{self.name}] {e}")                  
+            
+    def _target(self,data:dict):
+        """Override in subclass"""
+        raise NotImplementedError
+        
+    def stop(self):
+        self._exit.set()
+                
 
 class RWThread(Thread):
     """
@@ -134,6 +185,54 @@ class WThread(Thread):
     def stop(self):
         self._exit = True
         
+class WThread_R1(Thread):
+    """
+    Simplification of WThread. Solves two problems:
+        1. Condition is redundant with Queue: queue.Queue is already 
+        thread-safe and has its own internal locking
+        2. The wait-loop logic defeats the purpose of threading: 
+            self.write_condition.wait(timeout=0.5) makes WThread block until 
+            the downstream thread has consumed the item
+    """   
+    
+    def __init__(self,
+                 name : str,
+                 write_buffer: Queue,
+                 **kwargs):
+        
+        super().__init__(target = self._target,
+                         **kwargs)
+        self.name = name
+        self.write_buffer = write_buffer
+        self._exit = Event()
+        self.daemon = True  # dies automatically if main thread exits
+
+    def run(self):
+        
+        # Check if thread has been stopped
+        while not self._exit.is_set():
+            
+            try:
+                # Execute target function
+                result = self._target()
+                
+                # Write result to buffer
+                self.write_buffer.put(result)  # blocks naturally if queue is full
+                
+            except queue.Empty:
+                continue
+            
+            except Exception as e:
+                print(f"[{self.name}] {e}")    
+                
+            
+    def _target(self):
+        """Override in subclass to produce data."""
+        raise NotImplementedError
+
+    def stop(self):
+        self._exit.set()
+        
         
 class RThread(Thread):
     """
@@ -149,7 +248,8 @@ class RThread(Thread):
         self.read_condition = read_condition
         self._exit = False 
         
-        super().__init__(target=target,**kwargs)
+        super().__init__(target=target,
+                         **kwargs)
         
     def run(self):
         
@@ -182,3 +282,60 @@ class RThread(Thread):
         with self.read_condition:
             self._exit = True
             self.read_condition.notify_all()
+            
+            
+class RThread_R1(Thread):
+    """
+    Base class for a thread that reads from a buffer
+    """
+    def __init__(self,
+                 name : str,
+                 read_buffer:Queue,
+                 **kwargs):
+        
+        # Check input arguments
+        if not isinstance(name,str):
+            raise TypeError(f'name is type {type(name)} instead of {str}.')
+        if not isinstance(read_buffer,Queue):
+            raise TypeError(f'read_buffer is type {type(read_buffer)} instead of {Queue}.')
+        if not isinstance(name,str):
+            raise TypeError(f'self._target is type {type(self._target)} instead of {types.FunctionType}.')
+        
+        # Call __init__ of parent class
+        super().__init__(**kwargs,
+                         target = self._target)
+        
+        # Assign user specified attributes
+        self.name = name
+        self.read_buffer = read_buffer
+        
+        # Standard attributes
+        self._exit = Event()
+        self.daemon = True  # dies automatically if main thread exits
+        
+        
+        
+    def run(self):
+        
+        # Check if thread has been stopped
+        while not self._exit.is_set():
+            
+            try:
+                # Execute target function
+                result = self._target()
+
+            except queue.Empty:
+                continue
+            
+            except Exception as e:
+                print(f"[{self.name}] {e}")       
+                       
+    def _target(self):
+        """Override in subclass to produce data."""
+        
+        raise NotImplementedError
+            
+    def stop(self):
+        self._exit.set()
+
+            
