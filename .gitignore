@@ -1,8 +1,6 @@
-
-HSPyTools.egg-info/top_level.txt
-HSPyTools.egg-info/requires.txt
-HSPyTools.egg-info/PKG-INFO
-HSPyTools.egg-info/dependency_links.txt
+__pycache__/
+**/__pycache__
 *.pyc
-HSPyTools.egg-info/SOURCES.txt
-/build
+*.egg-info/
+build/
+dist/
