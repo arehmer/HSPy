@@ -6,3 +6,8 @@ HSPyTools.egg-info/dependency_links.txt
 *.pyc
 HSPyTools.egg-info/SOURCES.txt
 /build
+HSPy.egg-info/dependency_links.txt
+HSPy.egg-info/PKG-INFO
+HSPy.egg-info/requires.txt
+HSPy.egg-info/SOURCES.txt
+HSPy.egg-info/top_level.txt
