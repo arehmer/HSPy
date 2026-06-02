@@ -179,10 +179,12 @@ class Imshow(RThread):
         # Check success flag of upstream thread
         if result['success'] == True:
 
-            if 'frame_proc' in list(result.keys()):
-                frame = result['frame_proc']
-            else:
-                frame = result['frame']
+            # if 'frame_proc' in list(result.keys()):
+            #     frame = result['frame_proc']
+            # else:
+            #     frame = result['frame']
+                
+            frame = result['frame']
     
             # Reshape if not the proper size
             if frame.ndim == 1:
@@ -230,6 +232,11 @@ class Imshow(RThread):
                     # Get frame (processed)
                     frame = result['frame_plot']
                     
+                    # Scale it up by a factor of 5
+                    sf = 10
+                    # frame = cv2.resize(frame, (0,0), fx=sf, fy=sf) 
+                    frame = np.repeat(np.repeat(frame, sf, axis=0), sf, axis=1)
+                    
                     # Convert frame to RGB to be able to plot colored 
                     # boxes
                     frame = cv2.cvtColor(frame,cv2.COLOR_GRAY2RGB)
@@ -240,16 +247,46 @@ class Imshow(RThread):
                                        
                         # Draw bounding boxes
                         for b in bboxes.index:
-                            
+                                                        
                             box = bboxes.loc[[b]]
                         
+                            if box['confirmed'].item() != True:
+                                continue
+                            
                             x,y = int(box['xtl'].item()),int(box['ytl'].item()),
                             w = int(box['xbr'].item()) - int(box['xtl'].item())
                             h = int(box['ybr'].item()) - int(box['ytl'].item())
-  
                             
-                            frame = cv2.rectangle(frame, (x,y), (x+w,y+h), (255,255,0),1)
-                    
+                            # Scale coordinates
+                            x = int(sf*x); y = int(sf*y); w = int(sf*w); h = int(sf*h)
+                            
+                            frame = cv2.rectangle(frame,
+                                                  (x,y),
+                                                  (x+w,y+h),
+                                                  (255,255,0),1)
+                            
+                            # Write score if it exists
+                            if box['score'].item() != -99:
+                                font = cv2.FONT_HERSHEY_SIMPLEX
+                                blxy = (x+1,y+10)
+                                fontScale              = 0.4
+                                fontColor              = (255,255,0)
+                                thickness              = 1
+                                lineType               = 2
+                                
+                                score = f'{box['score'].item():.2}'
+                                
+                                cv2.putText(frame,
+                                            score, 
+                                            blxy, 
+                                            font, 
+                                            fontScale,
+                                            fontColor,
+                                            thickness,
+                                            lineType)
+    
+
+                            
                     cv2.imshow(self.window_name,frame)
                     cv2.waitKey(1)
                 
