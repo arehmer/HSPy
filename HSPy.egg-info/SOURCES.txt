@@ -24,7 +24,8 @@ hspy/cv/thresh.py
 hspy/cv/tracker.py
 hspy/drivers/__init__.py
 hspy/drivers/i2c/__init__.py
-hspy/drivers/i2c/htpa32x32d.py
+hspy/drivers/i2c/db.py
+hspy/drivers/i2c/drivers.py
 hspy/ipc/__init__.py
 hspy/ipc/misc.py
 hspy/ipc/threads.py
