@@ -111,12 +111,18 @@ if __name__ == '__main__':
     i2c_driver.start_i2cstream()
     consumer_thread.start()
     
-    # Let threads run 20 seconds
-    time.sleep(5)
     
-    # Stop the threads in reversed order!
-    print('Shutting down threads...')
-    consumer_thread.stop()
-    i2c_driver.stop_i2cstream()
-
+    try:
+        # Keep the main thread alive, waiting for Ctrl+C
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopping threads...")
+    finally:
+        # Stop the threads in reversed order!
+        consumer_thread.stop()
+        i2c_driver.stop_i2cstream()
         
+        print("All threads stopped.")
+    
+    print('End')        

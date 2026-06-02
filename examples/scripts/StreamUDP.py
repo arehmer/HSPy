@@ -145,12 +145,18 @@ if __name__ == '__main__':
     udp_thread.start()
     plot_thread.start()
 
-    # Let threads run 20 seconds
-    time.sleep(5)
+    try:
+        # Keep the main thread alive, waiting for Ctrl+C
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopping threads...")
+    finally:
+        # Stop the threads in reversed order!
+        plot_thread.stop()
+        udp_thread.stop()
+        
+        print("All threads stopped.")
     
-    # Stop the threads in reversed order!
-    plot_thread.stop()
-    udp_thread.stop()
-
     print('End')
         
