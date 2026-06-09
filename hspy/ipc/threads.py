@@ -244,6 +244,12 @@ class Imshow(RThread):
                     # Get bboxes if available
                     if 'bboxes' in result.keys():
                         bboxes = result['bboxes']
+                        
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        fontScale              = 0.4
+                        fontColor              = (255,255,0)
+                        thickness              = 1
+                        lineType               = 2
                                        
                         # Draw bounding boxes
                         for b in bboxes.index:
@@ -284,7 +290,18 @@ class Imshow(RThread):
                                             fontColor,
                                             thickness,
                                             lineType)
-    
+                                
+                        # Write the number of persons in the upper left corner
+                        num_persons = sum(bboxes['confirmed'] == True)
+                        
+                        cv2.putText(frame,
+                                    f'Number of persons: {num_persons}', 
+                                    (0,20), 
+                                    font, 
+                                    fontScale,
+                                    fontColor,
+                                    thickness,
+                                    lineType)
 
                             
                     cv2.imshow(self.window_name,frame)
