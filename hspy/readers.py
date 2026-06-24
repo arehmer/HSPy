@@ -32,6 +32,27 @@ class HTPAdGUI_FileReader():
        
                 
     def read_htpa_video(self,path):
+        warnings.warn('This function is deprecated and will be deleted in the future. Use import_bdstxt instead.',DeprecationWarning)
+        return self.import_bdstxt(path)
+
+    def import_bdstxt(self,path:Path) -> (pd.DataFrame, bytes):
+        
+        """
+        
+
+        Parameters
+        ----------
+        path : TYPE
+            DESCRIPTION.
+
+        Returns
+        -------
+        df_video : TYPE
+            DESCRIPTION.
+        header : TYPE
+            DESCRIPTION.
+
+        """
         
         # Check if path is provided as pathlib
         if not isinstance(path,Path):
@@ -49,7 +70,7 @@ class HTPAdGUI_FileReader():
             return None
         
         return df_video, header
-    
+        
     def _import_txt(self,path,**kwargs):
         
         # Read the very first line, which contains the header
