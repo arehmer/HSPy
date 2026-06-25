@@ -492,7 +492,7 @@ class TPArray():
             
             self._mask = np.ones(self._npsize)
             
-            # path to array data
+            # path to EEPROM map
             path = Path(__file__).parent / 'arraytypes' / '160x120.json'
             
             # Load calibration data from file
@@ -504,6 +504,13 @@ class TPArray():
             self.DevConst['NROFPTAT'] = 2
             
             warnings.warn('ArrayType not fully implemented!')
+            
+            # path to EEPROM map
+            path = Path(__file__).parent / 'arraytypes' / '80x60.json'
+            
+            # Load calibration data from file
+            self._load_calib_json(path)
+            
             
         elif self.ArrayType == ArrayTypes['HTPA50x50d']:
             self.DevConst['NROFATC'] = 0
