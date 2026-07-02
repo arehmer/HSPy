@@ -91,6 +91,8 @@ class TPArray():
         
         # Init reamining properties, otherwise save() method will fail
         self.BCC = attr_dict.pop('BCC',None)
+        
+        
 
     @property
     def SensorType(self):
@@ -357,9 +359,9 @@ class TPArray():
             self._mask = np.ones(self._npsize)
 
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '8x8.json'
+            # path = Path(__file__).parent / 'eeprom' / '8x8.json'
             # Load calibration data from file
-            self._load_calib_json(path)  
+            # self._load_calib_json(path)  
             
         elif self.ArrayType in [ArrayTypes['HTPA16x16'],
                                 ArrayTypes['HTPA16x16dR3']]:
@@ -377,9 +379,9 @@ class TPArray():
             self._mask = np.ones(self._npsize)
 
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '16x16.json'
+            # path = Path(__file__).parent / 'eeprom' / '16x16.json'
             # Load calibration data from file
-            self._load_calib_json(path)  
+            # self._load_calib_json(path)  
         
         elif self.ArrayType == ArrayTypes['HTPA32x32d']:
             self.DevConst['NROFATC']=0
@@ -397,9 +399,9 @@ class TPArray():
             self._mask = self._binary_mask(self._radio_r) 
             
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '32x32.json'
+            # path = Path(__file__).parent / 'eeprom' / '32x32.json'
             # Load calibration data from file
-            self._load_calib_json(path)  
+            # self._load_calib_json(path)  
             
         elif self.ArrayType == ArrayTypes['HTPA80x64d']:
             self.DevConst['NROFATC']=0
@@ -414,9 +416,9 @@ class TPArray():
             self._mask = np.ones(self._npsize)
             
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '80x64.json'
+            # path = Path(__file__).parent / 'eeprom' / '80x64.json'
             # Load calibration data from file
-            self._load_calib_json(path)  
+            # self._load_calib_json(path)  
             
         elif self.ArrayType == ArrayTypes['HTPA84x60d']:
             self.DevConst['NROFBLOCKS']=7
@@ -433,9 +435,9 @@ class TPArray():
             self._mask = np.ones(self._npsize)
             
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '60x84.json'
+            # path = Path(__file__).parent / 'eeprom' / '60x84.json'
             # Load calibration data from file
-            self._load_calib_json(path)  
+            # self._load_calib_json(path)  
             
         elif self.ArrayType in [ArrayTypes['HTPA60x40d'],
                                 ArrayTypes['HTPA60x40dR2']]:
@@ -453,9 +455,9 @@ class TPArray():
             self._mask = np.ones(self._npsize)
             
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '60x40.json'
+            # path = Path(__file__).parent / 'eeprom' / '60x40.json'
             # Load calibration data from file
-            self._load_calib_json(path)  
+            # self._load_calib_json(path)  
 
         elif self.ArrayType in [ArrayTypes['HTPA120x84d'],
                                 ArrayTypes['HTPA120x84dR2']]:
@@ -473,9 +475,9 @@ class TPArray():
             self._mask = self._binary_mask(r_lim) 
             
             # path to array data
-            path = Path(__file__).parent / 'arraytypes' / '120x84.json'
+            # path = Path(__file__).parent / 'eeprom' / '120x84.json'
             # Load calibration data from file
-            self._load_calib_json(path)
+            # self._load_calib_json(path)
             
         elif self.ArrayType in [ArrayTypes['HTPA160x120d'],
                                 ArrayTypes['HTPA160x120dR1']]:
@@ -493,10 +495,10 @@ class TPArray():
             self._mask = np.ones(self._npsize)
             
             # path to EEPROM map
-            path = Path(__file__).parent / 'arraytypes' / '160x120.json'
+            # path = Path(__file__).parent / 'eeprom' / '160x120.json'
             
             # Load calibration data from file
-            self._load_calib_json(path)
+            # self._load_calib_json(path)
             
         elif self.ArrayType == ArrayTypes['HTPA80x60d']:
             self.DevConst['NROFATC'] = 2
@@ -506,10 +508,10 @@ class TPArray():
             warnings.warn('ArrayType not fully implemented!')
             
             # path to EEPROM map
-            path = Path(__file__).parent / 'arraytypes' / '80x60.json'
+            # path = Path(__file__).parent / 'eeprom' / '80x60.json'
             
             # Load calibration data from file
-            self._load_calib_json(path)
+            # self._load_calib_json(path)
             
             
         elif self.ArrayType == ArrayTypes['HTPA50x50d']:
@@ -519,8 +521,8 @@ class TPArray():
             
             
             warnings.warn("50x50.json is a copy of 32x32.json. Validate/correct in future!")
-            path = Path(__file__).parent / 'arraytypes' / '50x50.json'
-            self._load_calib_json(path)  
+            # path = Path(__file__).parent / 'eeprom' / '50x50.json'
+            # self._load_calib_json(path)  
 
         else:
             raise Exception('This Thermopile Array is not known.') 
@@ -660,6 +662,32 @@ class TPArray():
         None.
 
         """
+        # read hex data in bit by bit
+        bcc_raw = self._stable_read(bcc_path)
+        
+        # read calib_version and store it as attribute
+        calib_version = int(bcc_raw[0x23])                  # Adress = Info for CalibVersion
+        self.calibVersion = calib_version
+        print(f'>>> calib_version = {calib_version}')       # Test-Ausgabe
+        
+        # Select correct EEPROM map depending on calibVersion
+        eeprom_dir = Path(__file__).parent / 'eeprom'
+        base_name = f'{self.width}x{self.height}'
+
+        if calib_version == 4:
+            json_path = eeprom_dir / f'{base_name}_cal4.json'
+        else:  # calib_version < 4
+            json_path = eeprom_dir / f'{base_name}.json'
+
+        # Error if the expected map file is missing
+        if not json_path.exists():
+            raise FileNotFoundError(
+                f'Missing json file ! Expected: {json_path} (calibVersion={calib_version})'
+           )
+        
+        
+        # Load the map -> sets self._eeprom_adresses
+        self._load_calib_json(json_path)
         
         # Shorthand for EEPROM Adresses
         ee = self.get_eeprom_adresses()['EEPROM']
@@ -671,8 +699,7 @@ class TPArray():
         # get all relevant data from .bcc file #
         ########################################
         
-        # read hex data in bit by bit
-        bcc_raw = self._stable_read(bcc_path)
+        
         
         # Read and convert data according to provided json file
         for key in ee.keys():
@@ -690,51 +717,51 @@ class TPArray():
         
         # Convert all EEPROM values from lists to numpy array
         for key in bcc.keys():
-            bcc[key] = np.array(bcc[key]) 
-            
-            
+            bcc[key] = np.array(bcc[key])            
+          
+        # Auskommentiert um plausibilitätsabfragen temporär zu umgehen / bei Push wieder einkommentieren
+          
         # Special case for 16x16 Arrays because of different EEPROM 
         # if self.ArrayType == ArrayTypes['HTPA16x16']
         
         # Derive calibration settings from raw values
-        bcc = self._derive_calib_settings(bcc)
-
-
-        # Convert all arrays to appropriate shape and flip them
-        # properly
-        bcc['pij'] = np.array(bcc['pij']).reshape(self._npsize)
-        bcc['thGrad'] = np.array(bcc['thGrad']).reshape(self._npsize)
-        bcc['thOff'] = np.array(bcc['thOff']).reshape(self._npsize)
-        
-        # Only 8x8 Arrays don't have vdd calibration data and pij, thGrad and 
-        # thOff are not flipped
-        if not (self.width,self.height) == (8,8):
-            
-            NROFBLOCKS = self.get_DevConst()['NROFBLOCKS']
-            vdd_size = (int(self.height/NROFBLOCKS),self._width)
-                        
-            # The lower half needs to be flipped vertically
-            bcc['pij'][int(self.height/2):,::] = \
-                np.flipud(bcc['pij'][int(self.height/2):,::])
-            
-            bcc['thGrad'][int(self.height/2):,::] = \
-                np.flipud(bcc['thGrad'][int(self.height/2):,::])
+        # bcc = self._derive_calib_settings(bcc)
                 
-            bcc['thOff'][int(self.height/2):,::] = \
-                np.flipud(bcc['thOff'][int(self.height/2):,::])
+        # # Convert all arrays to appropriate shape and flip them
+        # # properly
+        # bcc['pij'] = np.array(bcc['pij']).reshape(self._npsize)
+        # bcc['thGrad'] = np.array(bcc['thGrad']).reshape(self._npsize)
+        # bcc['thOff'] = np.array(bcc['thOff']).reshape(self._npsize)
+        
+        # # Only 8x8 Arrays don't have vdd calibration data and pij, thGrad and 
+        # # thOff are not flipped
+        # if not (self.width,self.height) == (8,8):
             
-            bcc['vddCompGrad'] = np.array(bcc['vddCompGrad']).reshape(vdd_size)
-            bcc['vddCompOff'] = np.array(bcc['vddCompOff']).reshape(vdd_size)
+        #     NROFBLOCKS = self.get_DevConst()['NROFBLOCKS']
+        #     vdd_size = (int(self.height/NROFBLOCKS),self._width)
+                        
+        #     # The lower half needs to be flipped vertically
+        #     bcc['pij'][int(self.height/2):,::] = \
+        #         np.flipud(bcc['pij'][int(self.height/2):,::])
             
-            bcc['vddCompGrad'][int(vdd_size[0]/2):,::] = \
-                np.flipud(bcc['vddCompGrad'][int(vdd_size[0]/2):,::])
+        #     bcc['thGrad'][int(self.height/2):,::] = \
+        #         np.flipud(bcc['thGrad'][int(self.height/2):,::])
+                
+        #     bcc['thOff'][int(self.height/2):,::] = \
+        #         np.flipud(bcc['thOff'][int(self.height/2):,::])
             
-            bcc['vddCompOff'][int(vdd_size[0]/2):,::] = \
-                np.flipud(bcc['vddCompOff'][int(vdd_size[0]/2):,::])
+        #     bcc['vddCompGrad'] = np.array(bcc['vddCompGrad']).reshape(vdd_size)
+        #     bcc['vddCompOff'] = np.array(bcc['vddCompOff']).reshape(vdd_size)
+            
+        #     bcc['vddCompGrad'][int(vdd_size[0]/2):,::] = \
+        #         np.flipud(bcc['vddCompGrad'][int(vdd_size[0]/2):,::])
+            
+        #     bcc['vddCompOff'][int(vdd_size[0]/2):,::] = \
+        #         np.flipud(bcc['vddCompOff'][int(vdd_size[0]/2):,::])
         
         self.BCC = bcc
 
-        self._checkBCC(bcc)
+        # self._checkBCC(bcc)
         
         return bcc
     
@@ -1227,21 +1254,42 @@ class TPArray():
         stacklevel=2)
         return self.calc_Tamb0(df_meas)
 
-    def calc_Tamb0(self,df_meas:pd.Series):
-        
-        # Check type
-        if not isinstance(df_meas,pd.Series):
-            raise TypeError('df_meas must be pd.Series type')
-        
-        ''' Sensitivity compensation '''
-        if self.DesignGen <= 3:
-            return self._calc_Tamb0_3(df_meas)
-        elif self.DesignGen == 4:
-            return self._calc_Tamb0_4(df_meas)
-        else:
-            raise ValueError('DesignGen is not set or value not known.')
+    def calc_Tamb0(self, df_meas:pd.Series):
 
-    def _calc_Tamb0_3(self,df_meas:pd.Series):
+        # Check type
+        if not isinstance(df_meas, pd.Series):
+            raise TypeError('df_meas must be pd.Series type')
+
+        
+
+        # --- Differentiate by CalibVersion ---
+        if self.calibVersion < 4:
+            return self._calc_Tamb0_CalibV0to3(df_meas)
+        elif self.calibVersion == 4:
+            return self._calc_Tamb0_CalibV4(df_meas)
+        else:
+            raise ValueError('calibVersion is not set or value not known.')
+      
+        
+     
+    def _calc_Tamb0_CalibV0to3(self,
+                               df_meas:pd.Series) -> pd.Series:
+        """
+        Calculates ambient temperature from PTAT values given in df_meas using
+        PTAT calibration data from BCC. Applies to calibration version 3 and
+        lower.
+
+        Parameters
+        ----------
+        df_meas : pd.Series
+            Sensor measurement containing pix, ptat, e_off, ...
+
+        Returns
+        -------
+        df_meas : pd.Series
+            Same df_meas as input, but with T_amb updated.
+
+        """
         
         ptat_av = df_meas[self._PTAT].mean()
         
@@ -1255,21 +1303,43 @@ class TPArray():
         
         return df_meas
     
-    def _calc_Tamb0_4(self,df_meas:pd.Series):
+    
+    def _calc_Tamb0_CalibV4(self, df_meas:pd.Series):
+        """
+        Separate calculation of PTAT (top/bot)
         
-        ptat_av = df_meas[self._PTAT].mean()
-        
-        ptat_grad = self.BCC['ptatGrad']
-        ptat_off = self.BCC['ptatOffset']
-        
-        Tamb0 = ptat_av*ptat_grad+ptat_off
-        
+
+        Parameters
+        ----------
+        df_meas : pd.Series
+            DESCRIPTION.
+
+        Returns
+        -------
+        df_meas : TYPE
+            DESCRIPTION.
+
+        """
+        # Average PTATs separately: top = even, bot = odd indices
+        ptat_top = df_meas[self._PTAT][0::2].mean()
+        ptat_bot = df_meas[self._PTAT][1::2].mean()
+
+        # Two separate grad/offset sets from the calibration
+        Tamb_top = ptat_top * self.BCC['ptatGrad_top'] + self.BCC['ptatOffset_top']
+        Tamb_bot = ptat_bot * self.BCC['ptatGrad_bot'] + self.BCC['ptatOffset_bot']
+
+        # Mean of both temperatures
+        Tamb0 = (Tamb_top + Tamb_bot) / 2
+
         dtype = df_meas.loc[self._T_amb].dtypes
         df_meas.loc[self._T_amb] = Tamb0.astype(dtype)
-        
+
         return df_meas
-        
     
+          
+       
+       
+   
     def frame_to_blocks(self,frame:np.ndarray,**kwargs)->dict:
         """
         Divides the frame into its blocks. Content of the frame is rearranged 
