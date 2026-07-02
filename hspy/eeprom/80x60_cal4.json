@@ -1,0 +1,25 @@
+{
+	"EEPROM":
+	{
+		"ptatGrad_top": {
+            "dtype": "float32",
+            "adr_start": "0x24",
+            "adr_stop": "0x27"},
+
+        "ptatOffset_top": {
+            "dtype": "float32",
+            "adr_start": "0x28",
+            "adr_stop": "0x2B"},
+
+        "ptatGrad_bot": {
+            "dtype": "float32",
+            "adr_start": "0x34",
+            "adr_stop": "0x37"},
+
+        "ptatOffset_bot": {
+            "dtype": "float32",
+            "adr_start": "0x38",
+            "adr_stop": "0x3B"}
+	
+	}
+}

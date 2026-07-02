@@ -1,0 +1,153 @@
+{
+	"EEPROM":
+	{
+
+	"pixcmin": {
+		"dtype": "float32",
+		"adr_start": "0x00",
+		"adr_stop":  "0x03"},
+
+	"pixcmax": {
+		"dtype": "float32",
+		"adr_start": "0x04",
+		"adr_stop":  "0x07"},
+
+	"gradScale": {
+		"dtype": "uint8",
+		"adr_start": "0x08",
+		"adr_stop":  "0x08"},
+
+	"epsilon": {
+		"dtype": "uint8",
+		"adr_start": "0x0D",
+		"adr_stop":  "0x0D"},
+
+	"MBIT(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x1A",
+		"adr_stop":  "0x1A"},
+
+	"BIAS(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x1B",
+		"adr_stop":  "0x1B"},
+
+	"CLK(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x1C",
+		"adr_stop":  "0x1C"},
+
+	"BPA(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x1D",
+		"adr_stop":  "0x1D"},
+
+	"PU(calib)": {
+		"dtype": "uint8",
+		"adr_start": "0x1E",
+		"adr_stop":  "0x1E"},
+
+	"MBIT(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x60",
+		"adr_stop":  "0x60"},
+
+	"BIAS(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x61",
+		"adr_stop":  "0x61"},
+
+	"CLK(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x62",
+		"adr_stop":  "0x62"},
+
+	"BPA(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x63",
+		"adr_stop":  "0x63"},
+
+	"PU(user)": {
+		"dtype": "uint8",
+		"adr_start": "0x63",
+		"adr_stop":  "0x63"},
+
+	"vddMeas_th1": {
+		"dtype": "uint16",
+		"adr_start": "0x26",
+		"adr_stop":  "0x27"},
+
+	"vddMeas_th2": {
+		"dtype": "uint16",
+		"adr_start": "0x28",
+		"adr_stop":  "0x29"},
+
+	"ptatGrad": {
+		"dtype": "float32",
+		"adr_start": "0x34",
+		"adr_stop":  "0x37"},
+
+	"ptatOffset": {
+		"dtype": "float32",
+		"adr_start": "0x38",
+		"adr_stop":  "0x3B"},
+
+	"ptat_th1": {
+		"dtype": "uint16",
+		"adr_start": "0x3C",
+		"adr_stop":  "0x3D"},
+
+	"ptat_th2": {
+		"dtype": "uint16",
+		"adr_start": "0x3E",
+		"adr_stop":  "0x3F"},
+
+	"vddScGrad": {
+		"dtype": "uint8",
+		"adr_start": "0x4E",
+		"adr_stop":  "0x4E"},
+
+	"vddScOff": {
+		"dtype": "uint8",
+		"adr_start": "0x4F",
+		"adr_stop":  "0x4F"},
+
+
+	"globalOff": {
+		"dtype": "int8",
+		"adr_start": "0x54",
+		"adr_stop":  "0x54"},
+
+	"globalGain": {
+		"dtype": "uint16",
+		"adr_start": "0x55",
+		"adr_stop": "0x56"},
+
+	"vddCompGrad": {
+		"dtype": "int16",
+		"adr_start": "0x1250",
+		"adr_stop":  "0x17EF"},
+
+	"vddCompOff": {
+		"dtype": "int16",
+		"adr_start": "0x17F0",
+		"adr_stop":  "0x1D8F"},
+
+
+	"thGrad": {
+		"dtype": "int8",
+		"adr_start": "0x1D90",
+		"adr_stop":  "0x313F"},
+
+	"thOff": {
+		"dtype": "int16",
+		"adr_start": "0x3140",
+		"adr_stop":  "0x589F"},
+
+	"pij": {
+		"dtype": "uint16",
+		"adr_start": "0x58A0",
+		"adr_stop":  "0x7FFF"}
+
+	}
+}

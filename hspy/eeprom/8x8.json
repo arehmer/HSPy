@@ -1,0 +1,58 @@
+{
+	"EEPROM":
+	{
+
+	"pixcmin": {
+		"dtype": "float32",
+		"adr_start": "0x00",
+		"adr_stop":  "0x03"},
+
+	"pixcmax": {
+		"dtype": "float32",
+		"adr_start": "0x04",
+		"adr_stop":  "0x07"},
+
+	"gradScale": {
+		"dtype": "uint8",
+		"adr_start": "0x10",
+		"adr_stop":  "0x10"},
+
+	"epsilon": {
+		"dtype": "uint8",
+		"adr_start": "0x1A",
+		"adr_stop":  "0x1A"},
+
+	"ptatGrad": {
+		"dtype": "float32",
+		"adr_start": "0x68",
+		"adr_stop":  "0x6B"},
+		
+	"ptatOffset": {
+		"dtype": "float32",
+		"adr_start": "0x6C",
+		"adr_stop":  "0x6F"},
+		
+
+	"globalGain": {
+		"dtype": "uint16",
+		"adr_start": "0x12",
+		"adr_stop": "0x13"},
+		
+
+	"thGrad": {
+		"dtype": "int16",
+		"adr_start": "0x80",
+		"adr_stop":  "0xFF"},
+
+	"thOff": {
+		"dtype": "int16",
+		"adr_start": "0x100",
+		"adr_stop":  "0x17F"},
+
+	"pij": {
+		"dtype": "uint16",
+		"adr_start": "0x180",
+		"adr_stop":  "0x1FF"}
+
+	}
+}
