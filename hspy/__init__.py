@@ -7,5 +7,5 @@ from . import hdf5_mgr
 from . import ipc
 from . import cv
 from . import clust
-from . import arraytypes
+from . import eeprom
 from . import drivers
