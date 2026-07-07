@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 import argparse  
 
-from hspytools.readers import HTPA_UDPReader
+from hspy.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 from hspytools.ipc.threads import UDP,Imshow
 from hspytools.ipc.threads_base import RThread

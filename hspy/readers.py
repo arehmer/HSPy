@@ -1380,7 +1380,7 @@ class HTPA_UDPReader():
         
         dev_id = int(call.split('DevID:')[1].split('Emission')[0])
         
-                
+        
         dev_info = pd.DataFrame(data = [],
                                 columns = self.col_dict.keys(),
                                 index = self.index)
@@ -1391,3 +1391,4 @@ class HTPA_UDPReader():
         dev_info = dev_info.astype(self.col_dict)    
         
         return dev_info
+    
