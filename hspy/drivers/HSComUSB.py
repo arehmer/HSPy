@@ -1,11 +1,16 @@
 import usb.core
 import usb.util
+import usb.backend.libusb1
+import libusb_package
 import re
 import numpy as np
+import sys
+
+# pip install libusb
+# pip install libusb-package
 
 
 class HS_USBCom:
-
     def __init__(self, idVendor=0x32a7, idProduct=0x0003, timeout=300):
         self.idVendor = idVendor
         self.idProduct = idProduct
@@ -17,16 +22,22 @@ class HS_USBCom:
         self.SYNC_WORD_1 = 0xF046
 
     def open(self):
-        self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct)
+        # explicit giving Backend, should work on Windows and Linux
+        backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
+        if backend is None:
+            raise RuntimeError("libusb Backend nicht gefunden")        
+        self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,backend=backend)
         if self.dev is None:
             raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X})".format(
                 self.idVendor, self.idProduct))
 
-        if self.dev.is_kernel_driver_active(0):
-            self.dev.detach_kernel_driver(0)
-        # #access must be granted, create rule: 
-        # #sudo nano /etc/udev/rules.d/99-htpa.rules
-        # #content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
+        # Kernel-driver only relevant for Linux
+        if sys.platform != 'win32':
+            if self.dev.is_kernel_driver_active(0):
+                self.dev.detach_kernel_driver(0)
+            # #access must be granted, create rule: 
+            # #sudo nano /etc/udev/rules.d/99-htpa.rules
+            # #content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
 
         self.dev.set_configuration()
 
@@ -52,10 +63,11 @@ class HS_USBCom:
             return
         try:
             usb.util.release_interface(self.dev, 0)
-            try:
-                self.dev.attach_kernel_driver(0)
-            except Exception:
-                pass  # no Kernel-driver present
+            if sys.platform != 'win32':            
+                try:
+                    self.dev.attach_kernel_driver(0)
+                except Exception:
+                    pass  # no Kernel-driver present
         finally:
             usb.util.dispose_resources(self.dev)
             self.dev = None

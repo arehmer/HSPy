@@ -22,6 +22,7 @@ hspy/cv/pyramids.py
 hspy/cv/seg.py
 hspy/cv/thresh.py
 hspy/cv/tracker.py
+hspy/drivers/HSComUSB.py
 hspy/drivers/__init__.py
 hspy/drivers/i2c/__init__.py
 hspy/drivers/i2c/db.py

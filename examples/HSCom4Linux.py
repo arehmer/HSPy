@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from hspy.tparray import TPArray
 from hspy.drivers.HSComUSB import *
-
+print(hspy.drivers.HSComUSB.__file__)  # zeigt den exakten Pfad der geladenen Datei
 
 
 with HS_USBCom() as com:

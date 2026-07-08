@@ -9,3 +9,4 @@ mcap
 tables
 h5py
 opencv-python
+pyusb

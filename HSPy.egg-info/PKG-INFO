@@ -15,6 +15,7 @@ Requires-Dist: mcap
 Requires-Dist: tables
 Requires-Dist: h5py
 Requires-Dist: opencv-python
+Requires-Dist: pyusb
 Dynamic: author
 Dynamic: author-email
 Dynamic: requires-dist
