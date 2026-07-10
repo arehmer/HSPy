@@ -11,36 +11,78 @@ import sys
 
 
 class HS_USBCom:
-    def __init__(self, idVendor=0x32a7, idProduct=0x0003, timeout=300):
+    def __init__(self, idVendor=0x32a7, idProduct=0x0003, timeout=300, serial_number=None):
         self.idVendor = idVendor
         self.idProduct = idProduct
         self.timeout = timeout
+        self.serial_number = serial_number
         self.dev = None
         self.ep_in = None
         self.ep_out = None
         self.SYNC_WORD_0 = 0xB0D0
         self.SYNC_WORD_1 = 0xF046
 
+    @staticmethod
+    def find_all_devices(idVendor=0x32a7, idProduct=0x0003):
+        """Returns list of all found serial numbers of the specific device"""
+        backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
+        devices = list(usb.core.find(idVendor=idVendor, idProduct=idProduct,
+                                    find_all=True, backend=backend))
+        serials = []
+        for d in devices:
+            sn=None
+            try:
+                sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)     # 0x0409 = English
+                print(f"Found: VID=0x{idVendor:04X} PID=0x{idProduct:04X} SN={sn}")
+            except Exception as e:
+                print(f"Warning reading SN: {e}")
+            finally:
+                try:
+                    usb.util.dispose_resources(d)  # free, will be opened in open() again
+                except Exception:
+                    pass
+            if sn is not None:  #only pass correct serials
+                serials.append(sn)
+        return serials
+
+
     def open(self):
-        # explicit giving Backend, should work on Windows and Linux
         backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
         if backend is None:
-            raise RuntimeError("libusb Backend nicht gefunden")        
-        self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,backend=backend)
+            raise RuntimeError("libusb Backend not found")
+
+        if self.serial_number is not None:
+            devices = list(usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,
+                                        find_all=True, backend=backend))
+            self.dev = None
+            for d in devices:
+                try:
+                    # set_configuration() first, then read string descriptor
+                    if sys.platform != 'win32':
+                        if d.is_kernel_driver_active(0):
+                            d.detach_kernel_driver(0)
+                    d.set_configuration()
+                    sn = usb.util.get_string(d, d.iSerialNumber)
+                    if sn == self.serial_number:
+                        self.dev = d
+                        break
+                    else:
+                        usb.util.dispose_resources(d)  # not the required device, free
+                except Exception as e:
+                    print(f"Warning at read of SN: {e}")
+                    continue
+        else:
+            self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct, backend=backend)
+            if sys.platform != 'win32':
+                if self.dev.is_kernel_driver_active(0):
+                    self.dev.detach_kernel_driver(0)
+            self.dev.set_configuration()
+
         if self.dev is None:
-            raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X})".format(
-                self.idVendor, self.idProduct))
+            raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X}, SN={})".format(
+                self.idVendor, self.idProduct, self.serial_number))
 
-        # Kernel-driver only relevant for Linux
-        if sys.platform != 'win32':
-            if self.dev.is_kernel_driver_active(0):
-                self.dev.detach_kernel_driver(0)
-            # #access must be granted, create rule: 
-            # #sudo nano /etc/udev/rules.d/99-htpa.rules
-            # #content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
-
-        self.dev.set_configuration()
-
+        # Endpoints ermitteln
         cfg = self.dev.get_active_configuration()
         intf = cfg[(0, 0)]
 
@@ -55,8 +97,52 @@ class HS_USBCom:
         if self.ep_out is None or self.ep_in is None:
             raise ValueError("Bulk-Endpoints not found")
 
-        print("Verbunden: ep_out=0x{:02X}, ep_in=0x{:02X}".format(
+        print("Connected: ep_out=0x{:02X}, ep_in=0x{:02X}".format(
             self.ep_out.bEndpointAddress, self.ep_in.bEndpointAddress))
+    # def open(self):
+    #     # explicit giving Backend, should work on Windows and Linux
+    #     backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
+    #     if backend is None:
+    #         raise RuntimeError("libusb Backend not found") 
+    #     if self.serial_number is not None:
+    #         # open a specific device
+    #         devices = list(usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,
+    #                                     find_all=True, backend=backend))
+    #         self.dev = next((d for d in devices
+    #                         if usb.util.get_string(d, d.iSerialNumber) == self.serial_number), None)               
+    #     else:            
+    #         self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,backend=backend)
+
+    #     if self.dev is None:
+    #         raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X}, SN={})".format(
+    #             self.idVendor, self.idProduct, self.serial_number))
+
+    #     # Kernel-driver only relevant for Linux
+    #     if sys.platform != 'win32':
+    #         if self.dev.is_kernel_driver_active(0):
+    #             self.dev.detach_kernel_driver(0)
+    #         # #access must be granted, create rule: 
+    #         # #sudo nano /etc/udev/rules.d/99-htpa.rules
+    #         # #content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
+
+    #     self.dev.set_configuration()
+
+    #     cfg = self.dev.get_active_configuration()
+    #     intf = cfg[(0, 0)]
+
+    #     self.ep_out = usb.util.find_descriptor(intf,
+    #         custom_match=lambda e:
+    #             usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
+
+    #     self.ep_in = usb.util.find_descriptor(intf,
+    #         custom_match=lambda e:
+    #             usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
+
+    #     if self.ep_out is None or self.ep_in is None:
+    #         raise ValueError("Bulk-Endpoints not found")
+
+    #     print("Verbunden: ep_out=0x{:02X}, ep_in=0x{:02X}".format(
+    #         self.ep_out.bEndpointAddress, self.ep_in.bEndpointAddress))
 
     def close(self):
         if self.dev is None:
