@@ -1413,38 +1413,49 @@ class TPArray():
         # Perform all compensation operations on data
         df_meas = self.rawmeas_comp(df_meas)
               
+
+        return self._apply_LuT(df_meas)
+    
+    def _apply_LuT(self,
+                   df_meas : pd.Series | pd.DataFrame ) -> pd.DataFrame : 
+    
+        # Check type
+        if not (isinstance(df_meas,pd.Series) or isinstance(df_meas,pd.DataFrame)):
+            raise TypeError('df_meas must be pd.Series or pd.DataFrame')
+    
+        # Convert from pd:Series to pd.DataFrame
+        if isinstance(df_meas,pd.Series):
+            df_meas = df_meas.to_frame().T
+        
+        df_meas = df_meas.copy()
+        
         df_dK = []
         
-        # Map every single pixel to the LuT
-        for i in df_meas.index:
+        # # Map every single pixel to the LuT
+        # for i in df_meas.index:
             
-            df_frame = df_meas.loc[i]
+        #     df_frame = df_meas.loc[i]
             
-            for p in self._pix:
-                
-                Ud = df_frame[p]
-                Tamb0 = df_frame[self._T_amb[0]] / 10   # Convert from dK to K
-                
-                pnt = pd.DataFrame(data = [[Ud,Tamb0]],
-                                   columns = ['Ud','Tamb0'])
-                
-                # try:
-                pnt = self._LuT.eval_LuT(pnt)
-                # except:
-                    # print(pnt)
-                    # raise Exception('Error converting the printed measurement')
-                df_frame[p] = int(pnt['To_LuT'].item()*10)
-                
-            print(f'Converted frame {i} to dK')
-                
-            # Convert back to DataFrame
-            df_frame = pd.DataFrame(df_frame).transpose()
-            df_dK.append(df_frame)
-                
-        df_dK = pd.concat(df_dK)
-        
-        return df_dK
-    
+        for p in self._pix:
+            
+            Ud = df_meas[p]
+            Tamb0 = df_meas[self._T_amb[0]]   # Convert from dK to K
+            
+            pnt = pd.DataFrame(data = np.vstack([Ud,Tamb0]).T,
+                               columns = ['Ud','Tamb0'])
+            
+            # try:
+            To = self._LuT.calc_To(pnt)
+            
+            # except:
+                # print(pnt)
+                # raise Exception('Error converting the printed measurement')
+            df_meas[p] = To
+            
+        return df_meas
+
+            
+            
     def _binary_mask(self,r_lim:float)->np.ndarray:
         """
         Creates a binary mask that is 1 if distance from image center
