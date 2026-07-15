@@ -696,10 +696,8 @@ class TPArray():
         bcc = {}
         
         ########################################
-        # get all relevant data from .bcc file #
+        # get data from .bcc file #
         ########################################
-        
-        
         
         # Read and convert data according to provided json file
         for key in ee.keys():
@@ -719,49 +717,124 @@ class TPArray():
         for key in bcc.keys():
             bcc[key] = np.array(bcc[key])            
           
-        # Auskommentiert um plausibilitätsabfragen temporär zu umgehen / bei Push wieder einkommentieren
           
-        # Special case for 16x16 Arrays because of different EEPROM 
-        # if self.ArrayType == ArrayTypes['HTPA16x16']
-        
         # Derive calibration settings from raw values
-        # bcc = self._derive_calib_settings(bcc)
-                
-        # # Convert all arrays to appropriate shape and flip them
-        # # properly
-        # bcc['pij'] = np.array(bcc['pij']).reshape(self._npsize)
-        # bcc['thGrad'] = np.array(bcc['thGrad']).reshape(self._npsize)
-        # bcc['thOff'] = np.array(bcc['thOff']).reshape(self._npsize)
+        bcc = self._derive_calib_settings(bcc)
         
-        # # Only 8x8 Arrays don't have vdd calibration data and pij, thGrad and 
-        # # thOff are not flipped
-        # if not (self.width,self.height) == (8,8):
-            
-        #     NROFBLOCKS = self.get_DevConst()['NROFBLOCKS']
-        #     vdd_size = (int(self.height/NROFBLOCKS),self._width)
-                        
-        #     # The lower half needs to be flipped vertically
-        #     bcc['pij'][int(self.height/2):,::] = \
-        #         np.flipud(bcc['pij'][int(self.height/2):,::])
-            
-        #     bcc['thGrad'][int(self.height/2):,::] = \
-        #         np.flipud(bcc['thGrad'][int(self.height/2):,::])
-                
-        #     bcc['thOff'][int(self.height/2):,::] = \
-        #         np.flipud(bcc['thOff'][int(self.height/2):,::])
-            
-        #     bcc['vddCompGrad'] = np.array(bcc['vddCompGrad']).reshape(vdd_size)
-        #     bcc['vddCompOff'] = np.array(bcc['vddCompOff']).reshape(vdd_size)
-            
-        #     bcc['vddCompGrad'][int(vdd_size[0]/2):,::] = \
-        #         np.flipud(bcc['vddCompGrad'][int(vdd_size[0]/2):,::])
-            
-        #     bcc['vddCompOff'][int(vdd_size[0]/2):,::] = \
-        #         np.flipud(bcc['vddCompOff'][int(vdd_size[0]/2):,::])
+        # Reshape calibration parameters
+        bcc = self._reshape_bcc(bcc, calib_version)
         
+        # Check content of BCC
+        self._checkBCC(bcc)
+        
+        # Set class attribute 
         self.BCC = bcc
 
-        # self._checkBCC(bcc)
+        
+        return bcc
+    
+    def _reshape_bcc(self, bcc : dict, calib_version : int):
+        """
+        
+
+        Parameters
+        ----------
+        bcc : dict
+            DESCRIPTION.
+        calib_version : int
+            DESCRIPTION.
+
+        Raises
+        ------
+        ValueError
+            DESCRIPTION.
+
+        Returns
+        -------
+        bcc : TYPE
+            DESCRIPTION.
+
+        """
+        if calib_version < 4:
+            bcc = self.reshape_bcc_CalibV0to3(bcc)
+        elif calib_version == 4:
+            bcc = self.reshape_bcc_CalibV4(bcc)
+        else:
+            raise ValueError(f'calib_version {calib_version} not known!')
+            
+        return bcc
+    
+    def reshape_bcc_CalibV0to3(self, bcc : dict):
+        """
+        
+
+        Parameters
+        ----------
+        bcc : dict
+            DESCRIPTION.
+
+        Returns
+        -------
+        bcc : TYPE
+            DESCRIPTION.
+
+        """
+        # Convert all arrays to appropriate shape and flip them
+        # properly
+        bcc['pij'] = np.array(bcc['pij']).reshape(self._npsize)
+        bcc['thGrad'] = np.array(bcc['thGrad']).reshape(self._npsize)
+        bcc['thOff'] = np.array(bcc['thOff']).reshape(self._npsize)
+        
+        # Only 8x8 Arrays don't have vdd calibration data and pij, thGrad and 
+        # thOff are not flipped
+        if not (self.width,self.height) == (8,8):
+            
+            NROFBLOCKS = self.get_DevConst()['NROFBLOCKS']
+            vdd_size = (int(self.height/NROFBLOCKS),self._width)
+                        
+            # The lower half needs to be flipped vertically
+            bcc['pij'][int(self.height/2):,::] = \
+                np.flipud(bcc['pij'][int(self.height/2):,::])
+            
+            bcc['thGrad'][int(self.height/2):,::] = \
+                np.flipud(bcc['thGrad'][int(self.height/2):,::])
+                
+            bcc['thOff'][int(self.height/2):,::] = \
+                np.flipud(bcc['thOff'][int(self.height/2):,::])
+            
+            bcc['vddCompGrad'] = np.array(bcc['vddCompGrad']).reshape(vdd_size)
+            bcc['vddCompOff'] = np.array(bcc['vddCompOff']).reshape(vdd_size)
+            
+            bcc['vddCompGrad'][int(vdd_size[0]/2):,::] = \
+                np.flipud(bcc['vddCompGrad'][int(vdd_size[0]/2):,::])
+            
+            bcc['vddCompOff'][int(vdd_size[0]/2):,::] = \
+                np.flipud(bcc['vddCompOff'][int(vdd_size[0]/2):,::])
+                
+        return bcc 
+
+    def reshape_bcc_CalibV4(self, bcc : dict):
+        """
+        
+
+        Parameters
+        ----------
+        bcc : dict
+            DESCRIPTION.
+
+        Raises
+        ------
+        NotImplementedError
+            DESCRIPTION.
+
+        Returns
+        -------
+        bcc : TYPE
+            DESCRIPTION.
+
+        """
+        # raise NotImplementedError('Error Message')
+        warnings.warn('Shape testing not implemented yet!')
         
         return bcc
     
