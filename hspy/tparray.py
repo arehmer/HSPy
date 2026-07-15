@@ -884,11 +884,11 @@ class TPArray():
         stacklevel=2)
         return self.comp_thermal_offset(df_meas)
 
-    def comp_thermal_offset(self,df_meas:pd.Series):
+    def comp_thermal_offset(self,df_meas:pd.Series | pd.DataFrame):
         
         # Check type
-        if not isinstance(df_meas,pd.Series):
-            raise TypeError('df_meas must be pd.Series type')
+        if not (isinstance(df_meas,pd.Series) or isinstance(df_meas,pd.DataFrame)):
+            raise TypeError('df_meas must be pd.Series or pd.DataFrame')
         
         ''' Thermal offset compensation '''
         if self.DesignGen <= 3:
@@ -903,31 +903,50 @@ class TPArray():
         
         ''' Thermal offset compensation '''
         
-        # Only for this function reverse self._size for easy use in numpy
-        size = (self._size[1],self._size[0])
+        if not (isinstance(df_meas,pd.Series) or isinstance(df_meas,pd.DataFrame)):
+            raise TypeError('df_meas must be pd.Series or pd.DataFrame')
+            return None
         
-        Pixel = df_meas[self._pix] 
-        pixel_dtype = df_meas[self._pix].dtypes
+        def comp_thermal_offset_row(df_row : pd.Series):
         
-        # Get stuff for calculation
-        ThGrad = self.BCC['thGrad'].reshape(size)
-        # avgPtat = df_meas[self._PTAT].mean().item()
-        gradScale = self.BCC['gradScale']
-        ThOffset = self.BCC['thOff'].reshape(size)
-        
-        
-        if (self.width,self.height) == (8,8):
-            T_depend = df_meas[self._T_amb].item()
-        else:
-            T_depend = df_meas[self._PTAT].mean().item()
+            ''' Thermal offset compensation '''
+            # Only for this function reverse self._size for easy use in numpy
+            size = (self._size[1],self._size[0])
             
-        V_th_comp = Pixel.values.reshape(size) -\
-            (ThGrad*T_depend) / np.power(2*np.ones(size),gradScale) -\
-                ThOffset
-         
-        df_meas.loc[self._pix] = V_th_comp.flatten().astype(pixel_dtype)
+            Pixel = df_row[self._pix] 
+            pixel_dtype = df_row[self._pix].dtypes
+            
+            # Get stuff for calculation
+            ThGrad = self.BCC['thGrad'].reshape(size)
+            # avgPtat = df_row[self._PTAT].mean().item()
+            gradScale = self.BCC['gradScale']
+            ThOffset = self.BCC['thOff'].reshape(size)
+            
+            
+            if (self.width,self.height) == (8,8):
+                T_depend = df_row[self._T_amb].item()
+            else:
+                T_depend = df_row[self._PTAT].mean().item()
+                
+            V_th_comp = Pixel.values.reshape(size) -\
+                (ThGrad*T_depend) / np.power(2*np.ones(size),gradScale) -\
+                    ThOffset
+             
+            df_row.loc[self._pix] = V_th_comp.flatten().astype(pixel_dtype)
+            
+            return df_row
         
-        return df_meas
+        if isinstance(df_meas,pd.Series):
+            df_comp = comp_thermal_offset_row(df_meas)
+            
+        elif isinstance(df_meas,pd.DataFrame):
+            comp_list = []
+            for i in df_meas.index:
+                comp_list.append(comp_thermal_offset_row(df_meas.loc[i]))
+            
+            df_comp = pd.concat(comp_list, axis = 1).T
+            
+        return df_comp
     
     def _comp_thermal_offset_4(self,df_meas:pd.Series):
         
