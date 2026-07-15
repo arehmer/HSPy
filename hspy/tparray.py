@@ -1438,6 +1438,7 @@ class TPArray():
     def _apply_LuT(self,
                    df_meas : pd.Series | pd.DataFrame ) -> pd.DataFrame : 
     
+        
         # Check type
         if not (isinstance(df_meas,pd.Series) or isinstance(df_meas,pd.DataFrame)):
             raise TypeError('df_meas must be pd.Series or pd.DataFrame')
@@ -1445,6 +1446,10 @@ class TPArray():
         # Convert from pd:Series to pd.DataFrame
         if isinstance(df_meas,pd.Series):
             df_meas = df_meas.to_frame().T
+        
+        # Get GLobalOffset
+        GlobOff = self.BCC['globalOff']
+
         
         df_meas = df_meas.copy()
         
@@ -1469,7 +1474,7 @@ class TPArray():
             # except:
                 # print(pnt)
                 # raise Exception('Error converting the printed measurement')
-            df_meas[p] = To
+            df_meas[p] = To + GlobOff
             
         return df_meas
 
