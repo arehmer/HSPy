@@ -90,10 +90,11 @@ class TPArray():
         self._init_DevConst()
         
         # Init reamining properties, otherwise save() method will fail
-        self.BCC = attr_dict.pop('BCC',None)
+        self._BCC = attr_dict.pop('BCC',None)
         
+        # Attribute for calibVersion address
+        self._calibVersionAdress = 0x23       # Adress = Info for CalibVersion
         
-
     @property
     def SensorType(self):
         return self._SensorType
@@ -147,7 +148,12 @@ class TPArray():
     def BCC(self):
         return self._BCC
     @BCC.setter
-    def BCC(self,BCC):
+    def BCC(self,BCC:dict):
+        
+        if not isinstance(BCC, dict):
+            raise TypeError(f'BCC must be {dict}, is type {type(BCC)}')
+            
+        self.calibVersion = int(np.array(BCC['CalibVersion']).flatten()[0])
         self._BCC = BCC
         
     # ------ Compatibility attributes. To be removed in future releases ------
@@ -666,7 +672,8 @@ class TPArray():
         bcc_raw = self._stable_read(bcc_path)
         
         # read calib_version and store it as attribute
-        calib_version = int(bcc_raw[0x23])                  # Adress = Info for CalibVersion
+        calib_version = int(bcc_raw[self._calibVersionAdress])                  
+        
         self.calibVersion = calib_version
         print(f'>>> calib_version = {calib_version}')       # Test-Ausgabe
         
@@ -726,6 +733,8 @@ class TPArray():
         
         # Check content of BCC
         self._checkBCC(bcc)
+        
+        
         
         # Set class attribute 
         self.BCC = bcc
