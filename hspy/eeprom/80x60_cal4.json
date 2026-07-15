@@ -19,7 +19,33 @@
         "ptatOffset_bot": {
             "dtype": "float32",
             "adr_start": "0x38",
-            "adr_stop": "0x3B"}
+            "adr_stop": "0x3B"},
+			
+			
+		"vddCompGrad": {
+            "dtype": "int16",
+            "adr_start": "0x0550",
+            "adr_stop":  "0x2ACF"},
+
+        "vddCompOff": {
+            "dtype": "int16",
+            "adr_start": "0x2AD0",
+            "adr_stop":  "0x504F"},
+
+        "thGrad": {
+            "dtype": "int16",
+            "adr_start": "0x5050",
+            "adr_stop":  "0x75CF"},
+
+        "thOff": {
+            "dtype": "int16",
+            "adr_start": "0x75D0",
+            "adr_stop":  "0x9B4F"},
+
+        "pij": {
+            "dtype": "uint16",
+            "adr_start": "0x9B50",
+            "adr_stop":  "0xC0CF"}
 	
 	}
 }
