@@ -1,6 +1,11 @@
 {
 	"EEPROM":
 	{
+		"CalibVersion": {
+            "dtype": "uint8",
+            "adr_start": " 0x23",
+            "adr_stop": " 0x23"},
+			
 		"ptatGrad_top": {
             "dtype": "float32",
             "adr_start": "0x24",
