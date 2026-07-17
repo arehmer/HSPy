@@ -23,11 +23,13 @@ from hspytools.tparray import TPArray
 
 from collections import deque
 
-from hspytools.ipc.threads_base import WThread,RThread, RThread_R1
+from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
 from hspytools.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 
-class UDP(WThread):
+
+
+class UDP(WThread_R1):
     """
     Class for running HTPA_UDP_Reader in a thread. Can only bind one device
     at this point
@@ -36,7 +38,6 @@ class UDP(WThread):
     def __init__(self,
                  udp_reader:HTPA_UDPReader,
                  write_buffer:Queue,
-                 write_condition:Condition,
                  IP:str = '',
                  DevID:int = -1,
                  Bcast_Addr:str = '',
@@ -92,12 +93,11 @@ class UDP(WThread):
         # Set time
         self.t0 = time.time()
         
-        super().__init__(target = self._target_function,
+        super().__init__(name = 'udp_thread',
                          write_buffer = write_buffer,
-                         write_condition = write_condition,
                          **kwargs)
             
-    def _target_function(self):
+    def _target(self):
         
         # print('Executed upd thread: ' + str(time.time()-self.t0) )
         
@@ -370,17 +370,6 @@ class DataRecord(RThread_R1):
         self._init_rec_dir()
        
         
-       # self.save_keys = ['bboxes','frame']                                     # Keys of values in the received data that are to be written to files
-        # self.rec_dir = None                                                     # Directory within save_dir, where recorded data is saved. Created automatically.
-        # self.file_path = {}                                                     # Dictionary of file paths
-        
-        # Set time
-        # self.t0 = time.time() 
-        
-        # self.imshow = imshow                                                    # Show the sensor stream
-        # self.window_name = kwargs.pop('window_name','Sensor stream')            # Name of the window the stream is shown in
-        
-
     def _init_rec_dir(self):
         '''
         Create a folder within save_dir, in which the recorded data is stored.
