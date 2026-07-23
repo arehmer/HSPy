@@ -129,7 +129,7 @@ class UDP(WThread_R1):
     def stop(self):
         
         # Set attribute exit to stop run method of thread
-        self._exit = True
+        self._exit.set()
         
         # Stop the stream
         self.udp_reader.stop_continuous_bytestream(DevID = self.DevID)
@@ -409,6 +409,7 @@ class DataRecord(RThread_R1):
             timestamp = data['t']
         else:
             timestamp = datetime.now()
+            data['t'] = timestamp
         
         # Make a filename
         filename = self.make_filename(self.counter,

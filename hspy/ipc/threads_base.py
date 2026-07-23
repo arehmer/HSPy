@@ -39,7 +39,7 @@ class RWThread_R1(Thread):
         
         # Check if thread has been stopped
         while not self._exit.is_set():
-            print('Here')
+            
             try:
                 
                 # Retrieve data
