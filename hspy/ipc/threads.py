@@ -26,7 +26,7 @@ from hspytools.tparray import TPArray
 from collections import deque
 
 from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
-from hspytools.readers import HTPA_UDPReader
+from hspy.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 
 
@@ -258,6 +258,9 @@ class UDP_PickleClient(WThread_R1):
                 packet, _addr = self._socket.recvfrom(65535)
             except socket.timeout:
                 continue
+            except OSError:
+                # Socket was closed (e.g. during shutdown) while blocked in recvfrom
+                break
 
             header = packet[:_PICKLE_HEADER_SIZE]
             chunk = packet[_PICKLE_HEADER_SIZE:]
