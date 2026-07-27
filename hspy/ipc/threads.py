@@ -6,6 +6,8 @@ Created on Thu Feb  8 16:13:39 2024
 """
 import time
 import cv2
+import socket
+import struct
 
 from queue import Queue
 from threading import Condition
@@ -29,7 +31,7 @@ from hspytools.tparray import TPArray
 
 
 
-class UDP(WThread_R1):
+class UDP_Client(WThread_R1):
     """
     Class for running HTPA_UDP_Reader in a thread. Can only bind one device
     at this point
@@ -135,8 +137,151 @@ class UDP(WThread_R1):
         self.udp_reader.stop_continuous_bytestream(DevID = self.DevID)
         
         # Release the array
-        self.udp_reader.release_tparray(self.DevID)     
-        
+        self.udp_reader.release_tparray(self.DevID)
+
+
+# Header put in front of every UDP datagram sent by UDP_PickleServer /
+# consumed by UDP_PickleClient: message id, index of this chunk, total
+# number of chunks the message was split into.
+_PICKLE_HEADER_FMT = '!IHH'
+_PICKLE_HEADER_SIZE = struct.calcsize(_PICKLE_HEADER_FMT)
+
+# Stay safely below the 65507 byte payload limit of a UDP datagram
+_PICKLE_MAX_CHUNK = 60000
+
+
+class UDP_PickleServer(RThread_R1):
+    """
+    Thread that reads arbitrary (picklable) data - e.g. a dict containing
+    a numpy array and a pandas DataFrame - from an upstream buffer and
+    sends it out via UDP to a single peer running a UDP_PickleClient.
+
+    Since a pickled payload can easily exceed the size of a single UDP
+    datagram, it is split into numbered chunks that are reassembled by
+    the receiving UDP_PickleClient. As with any data sent over UDP,
+    delivery is not guaranteed: a message of which one or more chunks
+    are lost in transit is silently dropped by the receiver.
+    """
+
+    def __init__(self,
+                 name:str,
+                 read_buffer:Queue,
+                 target_ip:str,
+                 target_port:int,
+                 **kwargs):
+
+        self.target_addr = (target_ip, target_port)
+
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self._msg_id = 0
+
+        super().__init__(name = name,
+                         read_buffer = read_buffer,
+                         **kwargs)
+
+    def _target(self):
+
+        # Get data (e.g. a dict with a numpy array / pandas DataFrame)
+        # from the upstream buffer
+        data = self.read_buffer.get()
+
+        # Serialize it
+        payload = pkl.dumps(data)
+
+        # Split the payload into chunks that fit into a single UDP
+        # datagram
+        chunks = [payload[i:i + _PICKLE_MAX_CHUNK]
+                 for i in range(0, len(payload), _PICKLE_MAX_CHUNK)] or [b'']
+
+        chunk_count = len(chunks)
+
+        # Send every chunk in its own datagram, prefixed with a header
+        # that allows the receiver to reassemble the message
+        for chunk_index, chunk in enumerate(chunks):
+            header = struct.pack(_PICKLE_HEADER_FMT,
+                                 self._msg_id,
+                                 chunk_index,
+                                 chunk_count)
+            self._socket.sendto(header + chunk, self.target_addr)
+
+        # Increment (and wrap) the message id
+        self._msg_id = (self._msg_id + 1) % 2**32
+
+        return None
+
+    def stop(self):
+        super().stop()
+        self._socket.close()
+
+
+class UDP_PickleClient(WThread_R1):
+    """
+    Thread that receives data sent by a UDP_PickleServer instance,
+    reassembles and unpickles it, and writes the resulting object
+    (e.g. a dict containing a numpy array and a pandas DataFrame) into
+    a buffer for downstream threads to consume.
+    """
+
+    def __init__(self,
+                 name:str,
+                 write_buffer:Queue,
+                 listen_ip:str = '0.0.0.0',
+                 listen_port:int = 0,
+                 timeout:float = 1.0,
+                 **kwargs):
+
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind((listen_ip, listen_port))
+        self._socket.settimeout(timeout)
+
+        # Chunks of messages that have not been fully received yet,
+        # keyed by message id
+        self._pending = {}
+
+        super().__init__(name = name,
+                         write_buffer = write_buffer,
+                         **kwargs)
+
+    @property
+    def listen_addr(self):
+        return self._socket.getsockname()
+
+    def _target(self):
+
+        # Keep listening until either a full message has been
+        # reassembled or the thread is stopped
+        while not self._exit.is_set():
+
+            try:
+                packet, _addr = self._socket.recvfrom(65535)
+            except socket.timeout:
+                continue
+
+            header = packet[:_PICKLE_HEADER_SIZE]
+            chunk = packet[_PICKLE_HEADER_SIZE:]
+
+            msg_id, chunk_index, chunk_count = struct.unpack(_PICKLE_HEADER_FMT,
+                                                              header)
+
+            chunks = self._pending.setdefault(msg_id, {})
+            chunks[chunk_index] = chunk
+
+            # Once every chunk of this message has arrived, reassemble
+            # it in order and hand it back to be put in the write buffer
+            if len(chunks) == chunk_count:
+                payload = b''.join(chunks[i] for i in range(chunk_count))
+                del self._pending[msg_id]
+                return pkl.loads(payload)
+
+        return None
+
+    def stop(self):
+        super().stop()
+        self._socket.close()
+
+
 class Imshow(RThread):
     """
     Class for plotting frames and possibly bounding boxes in a thread.
