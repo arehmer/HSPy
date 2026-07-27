@@ -33,8 +33,9 @@ Command-line Arguments
 
 print('Loading libraries...')
 
+import time
 import argparse
-from queue import Queue
+from queue import Queue, Empty
 
 from hspy.ipc.threads import UDP_PickleClient
 
@@ -83,13 +84,18 @@ if __name__ == '__main__':
     try:
         # Keep printing received messages until Ctrl+C
         while True:
-            data = recv_buffer.get()
+            try:
+                data = recv_buffer.get(timeout=0.5)
+            except Empty:
+                continue  # loop back, checking for KeyboardInterrupt each time
 
             frame = data['frame']
             table = data['table']
 
             print(f"Received message {data['image_id']}: "
                  f"frame shape {frame.shape}, table shape {table.shape}")
+
+            
     except KeyboardInterrupt:
         print("\nStopping thread...")
     finally:
