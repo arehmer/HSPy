@@ -34,6 +34,66 @@ from multiprocessing import Queue as MPQueue
 from multiprocessing import shared_memory
 import pickle
 import queue
+import time
+
+
+# ── Opt-in per-process profiling ────────────────────────────────────────────
+#
+# Off by default (zero overhead, zero behaviour change) -- pass
+# profile=True to any *Process_R1 constructor to turn it on for that
+# process. Every `profile_every` iterations it prints a rolling-average
+# report of where time in the run() loop actually went, then resets the
+# counters for the next window. This exists to answer exactly the
+# question "how much of my per-iteration time is compute vs. blocked on
+# the queue?" without hand-instrumenting every subclass.
+
+class _ProfileStat:
+    """Accumulates count / total / max for one timed quantity."""
+
+    __slots__ = ('count', 'total', 'max')
+
+    def __init__(self):
+        self.count = 0
+        self.total = 0.0
+        self.max = 0.0
+
+    def add(self, dt: float):
+        self.count += 1
+        self.total += dt
+        if dt > self.max:
+            self.max = dt
+
+    def mean(self) -> float:
+        return self.total / self.count if self.count else 0.0
+
+    def reset(self):
+        self.count = 0
+        self.total = 0.0
+        self.max = 0.0
+
+
+def _print_profile_report(name: str, stats: dict):
+    """
+    Prints a one-line rolling report (e.g.
+    "[processor_process] target=45.2ms (max 120.3ms, n=50), put=12.1ms
+    (max 30.0ms, n=50), cycle=57.3ms (max 140.1ms, n=50), rate=17.5Hz")
+    and resets every stat in `stats` for the next window.
+    """
+    parts = []
+    for key, stat in stats.items():
+        if stat.count == 0:
+            continue
+        parts.append(f"{key}={stat.mean()*1000:.1f}ms "
+                     f"(max {stat.max*1000:.1f}ms, n={stat.count})")
+
+    cycle = stats.get('cycle')
+    if cycle is not None and cycle.count and cycle.mean() > 0:
+        parts.append(f"rate={1.0/cycle.mean():.2f}Hz")
+
+    print(f"[{name}] " + ", ".join(parts), flush=True)
+
+    for stat in stats.values():
+        stat.reset()
 
 
 # ── Shared-memory-backed, queue.Queue-compatible IPC primitive ──────────────
@@ -218,6 +278,8 @@ class WProcess_R1(Process):
     def __init__(self,
                  name: str,
                  write_buffer,
+                 profile: bool = False,
+                 profile_every: int = 50,
                  **kwargs):
 
         # NOTE: Process (like Thread) has its own internal self._target
@@ -230,6 +292,14 @@ class WProcess_R1(Process):
         super().__init__(name=name, target=self._target, **kwargs)
 
         self.write_buffer = write_buffer
+
+        # profile=True prints a rolling-average timing report every
+        # profile_every iterations: how long _target() took (compute /
+        # upstream read, depending on subclass) vs. how long
+        # write_buffer.put() blocked, vs. the overall cycle time. Off by
+        # default -- zero overhead, zero behaviour change unless enabled.
+        self.profile = profile
+        self.profile_every = profile_every
 
         self._exit = Event()
         self.daemon = True  # dies automatically if parent process exits
@@ -247,15 +317,40 @@ class WProcess_R1(Process):
 
         self._setup()
 
+        if self.profile:
+            prof = {'target': _ProfileStat(), 'put': _ProfileStat(), 'cycle': _ProfileStat()}
+            prof_i = 0
+            prof_last_t = time.perf_counter()
+
         while not self._exit.is_set():
 
             try:
-                # Produce data
-                result = self._target()
+                if self.profile:
+                    t_cycle_start = time.perf_counter()
 
-                # Put result into downstream buffer (blocks naturally if
-                # the buffer is full, exactly like WThread_R1)
-                self.write_buffer.put(result)
+                    t0 = time.perf_counter()
+                    result = self._target()
+                    t1 = time.perf_counter()
+
+                    self.write_buffer.put(result)
+                    t2 = time.perf_counter()
+
+                    prof['target'].add(t1 - t0)
+                    prof['put'].add(t2 - t1)
+                    prof['cycle'].add(t_cycle_start - prof_last_t)
+                    prof_last_t = t_cycle_start
+
+                    prof_i += 1
+                    if prof_i % self.profile_every == 0:
+                        _print_profile_report(self.name, prof)
+
+                else:
+                    # Produce data
+                    result = self._target()
+
+                    # Put result into downstream buffer (blocks naturally
+                    # if the buffer is full, exactly like WThread_R1)
+                    self.write_buffer.put(result)
 
             except queue.Empty:
                 continue
@@ -288,11 +383,19 @@ class RProcess_R1(Process):
     def __init__(self,
                  name: str,
                  read_buffer,
+                 profile: bool = False,
+                 profile_every: int = 50,
                  **kwargs):
 
         super().__init__(name=name, target=self._target, **kwargs)
 
         self.read_buffer = read_buffer
+
+        # See WProcess_R1 for what this does. No 'put' stat here since
+        # this class has no write_buffer -- 'target' already includes
+        # whatever the subclass's read_buffer.get() call costs.
+        self.profile = profile
+        self.profile_every = profile_every
 
         self._exit = Event()
         self.daemon = True
@@ -304,10 +407,31 @@ class RProcess_R1(Process):
 
         self._setup()
 
+        if self.profile:
+            prof = {'target': _ProfileStat(), 'cycle': _ProfileStat()}
+            prof_i = 0
+            prof_last_t = time.perf_counter()
+
         while not self._exit.is_set():
 
             try:
-                self._target()
+                if self.profile:
+                    t_cycle_start = time.perf_counter()
+
+                    t0 = time.perf_counter()
+                    self._target()
+                    t1 = time.perf_counter()
+
+                    prof['target'].add(t1 - t0)
+                    prof['cycle'].add(t_cycle_start - prof_last_t)
+                    prof_last_t = t_cycle_start
+
+                    prof_i += 1
+                    if prof_i % self.profile_every == 0:
+                        _print_profile_report(self.name, prof)
+
+                else:
+                    self._target()
 
             except queue.Empty:
                 continue
@@ -340,12 +464,22 @@ class RWProcess_R1(Process):
                  name: str,
                  read_buffer,
                  write_buffer,
+                 profile: bool = False,
+                 profile_every: int = 50,
                  **kwargs):
 
         super().__init__(name=name, target=self._target, **kwargs)
 
         self.read_buffer = read_buffer
         self.write_buffer = write_buffer
+
+        # See WProcess_R1 for what this does. Note 'target' here times
+        # self.read_buffer.get() (blocking on upstream) AND compute
+        # together, since the subclass's _target() does both -- it is
+        # not further split out generically. 'put' times the downstream
+        # write on its own.
+        self.profile = profile
+        self.profile_every = profile_every
 
         self._exit = Event()
         self.daemon = True
@@ -357,14 +491,39 @@ class RWProcess_R1(Process):
 
         self._setup()
 
+        if self.profile:
+            prof = {'target': _ProfileStat(), 'put': _ProfileStat(), 'cycle': _ProfileStat()}
+            prof_i = 0
+            prof_last_t = time.perf_counter()
+
         while not self._exit.is_set():
 
             try:
-                # Retrieve + process data (subclass reads read_buffer itself)
-                result = self._target()
+                if self.profile:
+                    t_cycle_start = time.perf_counter()
 
-                # Put result into downstream buffer
-                self.write_buffer.put(result)
+                    t0 = time.perf_counter()
+                    result = self._target()
+                    t1 = time.perf_counter()
+
+                    self.write_buffer.put(result)
+                    t2 = time.perf_counter()
+
+                    prof['target'].add(t1 - t0)
+                    prof['put'].add(t2 - t1)
+                    prof['cycle'].add(t_cycle_start - prof_last_t)
+                    prof_last_t = t_cycle_start
+
+                    prof_i += 1
+                    if prof_i % self.profile_every == 0:
+                        _print_profile_report(self.name, prof)
+
+                else:
+                    # Retrieve + process data (subclass reads read_buffer itself)
+                    result = self._target()
+
+                    # Put result into downstream buffer
+                    self.write_buffer.put(result)
 
             except queue.Empty:
                 continue
