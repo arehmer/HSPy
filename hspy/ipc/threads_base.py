@@ -322,7 +322,7 @@ class RThread_R1(Thread):
         
         # Check if thread has been stopped
         while not self._exit.is_set():
-            
+
             try:
                 # Execute target function
                 result = self._target()
