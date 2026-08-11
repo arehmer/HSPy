@@ -351,17 +351,17 @@ class I2C_HTPA32x32d(I2C_Driver):
         data = self.read_frame(active_vdd)                        # read pixels, ptat, vdd
         data.update(self.read_electrical_offsets(blind_vdd))      # read electrical offsets
 
-        data = self.convert_i2c_data(data,
-                                     active_vdd,
-                                     blind_vdd)                    # convert and rearrange raw i2c data
+        # data = self.convert_i2c_data(data,
+        #                              active_vdd,
+        #                              blind_vdd)                    # convert and rearrange raw i2c data
 
-        if applyCalib:
-            # Calculates Temperatures from pixel voltages given cali-
-            # bration data from EEPROM
-            data = self.apply_calib(data)
+        # if applyCalib:
+        #     # Calculates Temperatures from pixel voltages given cali-
+        #     # bration data from EEPROM
+        #     data = self.apply_calib(data)
 
-        if calcdK:
-            data = self.apply_LuT(data)
+        # if calcdK:
+        #     data = self.apply_LuT(data)
 
         return data
 
