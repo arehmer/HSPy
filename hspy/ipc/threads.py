@@ -413,7 +413,7 @@ class Imshow(RThread_R1):
         # Get result from upstream thread
         data = self.read_buffer.get()
         
-        print(data.keys())
+        print(f"Received frame at {data['t']}")
         
         # Check success flag of upstream thread
         if data['success'] == True:
@@ -439,7 +439,7 @@ class Imshow(RThread_R1):
             annotations['confirmed'] = False
             annotations.loc[annotations['label']==1,'confirmed'] = True
             data['bboxes'] = annotations
-            print(annotations[['xtl','ytl','w','h','score']])
+
             
         else:
             # If upstream thread failed, set success flag to False
