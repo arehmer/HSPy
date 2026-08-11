@@ -28,6 +28,7 @@ from collections import deque
 from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
 from hspy.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
+
 from hspy.drivers.i2c import I2C_HTPA32x32d
 
 

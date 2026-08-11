@@ -22,7 +22,6 @@ import struct
 import time
 from datetime import datetime
 from typing import List, Optional
-import smbus2
 import numpy as np
 
 from hspy.LuT import LuT
