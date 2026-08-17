@@ -285,14 +285,14 @@ class UDP_PickleClient(WThread_R1):
         self._socket.close()
 
 
-class Imshow(RThread):
+class Imshow(RThread_R1):
     """
     Class for plotting frames and possibly bounding boxes in a thread.
     """
     
     def __init__(self,
+                 name :str,
                  read_buffer:Queue,
-                 read_condition:Condition,
                  ArrayType:int = None,
                  SensorType:int = None,
                  **kwargs):
@@ -312,27 +312,25 @@ class Imshow(RThread):
         self.t0 = time.time()
         
         # Call parent class
-        super().__init__(target = self._target_function,
+        super().__init__(name = name,
                          read_buffer = read_buffer,
-                         read_condition = read_condition,
                          **kwargs)
     
-    def _target_function(self):
+    def _target(self):
         
         # print('Executed imshow thread: ' + str(time.time()-self.t0) )
         
         # Get result from upstream thread
-        result = self.read_buffer.get()
-
+        data = self.read_buffer.get()
+        
+        print(data.keys())
+        
         # Check success flag of upstream thread
-        if result['success'] == True:
-
-            # if 'frame_proc' in list(result.keys()):
-            #     frame = result['frame_proc']
-            # else:
-            #     frame = result['frame']
+        if data['success'] == True:
+            
+                    
                 
-            frame = result['frame']
+            frame = data['pix_dK']
     
             # Reshape if not the proper size
             if frame.ndim == 1:
@@ -344,128 +342,125 @@ class Imshow(RThread):
             frame = frame.astype(np.uint8)
             
             # Save to dict
-            result['frame_plot'] = frame 
+            data['frame_plot'] = frame 
+            
+            # Write annotations to dict
+            annotations = data['annot_frame'].annotations
+            annotations['confirmed'] = False
+            annotations.loc[annotations['label']==1,'confirmed'] = True
+            data['bboxes'] = annotations
+            print(annotations[['xtl','ytl','w','h','score']])
             
         else:
             # If upstream thread failed, set success flag to False
-            result['success'] = False
+            data['success'] = False
 
             
-        return result
+        return data
     
     def run(self):
         
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         
         # Check if thread has been stopped
-        while self._exit == False:
+        while not self._exit.is_set():
             
-            # Acquire the read condition
-            with self.read_condition:
+            # Execute target function
+            data = self._target()
             
-                # Wait until the upstream thread notifies this thread
-                while self.read_buffer.empty():
-                    self.read_condition.wait()
-            
-                # Execute target function
-                result = self._target()
+            # Check success flag of upstream thread
+            if data['success'] is True:
                 
-                # Notify the upstream thread, that the item has been retrieved
-                # from the buffer and processed
-                self.read_condition.notify()
+                # Get frame (processed)
+                frame = data['frame_plot']
                 
-                # Check success flag of upstream thread
-                if result['success'] is True:
+                # Scale it up by a factor of 5
+                sf = 10
+                # frame = cv2.resize(frame, (0,0), fx=sf, fy=sf) 
+                frame = np.repeat(np.repeat(frame, sf, axis=0), sf, axis=1)
+                
+                # Convert frame to RGB to be able to plot colored 
+                # boxes
+                frame = cv2.cvtColor(frame,cv2.COLOR_GRAY2RGB)
+                
+                # Get bboxes if available
+                if 'bboxes' in data.keys():
+                    bboxes = data['bboxes']
                     
-                    # Get frame (processed)
-                    frame = result['frame_plot']
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    fontScale              = 0.4
+                    fontColor              = (255,255,0)
+                    thickness              = 1
+                    lineType               = 2
+                                   
+                    # Draw bounding boxes
+                    for b in bboxes.index:
+                                                    
+                        box = bboxes.loc[[b]]
                     
-                    # Scale it up by a factor of 5
-                    sf = 10
-                    # frame = cv2.resize(frame, (0,0), fx=sf, fy=sf) 
-                    frame = np.repeat(np.repeat(frame, sf, axis=0), sf, axis=1)
-                    
-                    # Convert frame to RGB to be able to plot colored 
-                    # boxes
-                    frame = cv2.cvtColor(frame,cv2.COLOR_GRAY2RGB)
-                    
-                    # Get bboxes if available
-                    if 'bboxes' in result.keys():
-                        bboxes = result['bboxes']
+                        if box['confirmed'].item() != True:
+                            continue
                         
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        fontScale              = 0.4
-                        fontColor              = (255,255,0)
-                        thickness              = 1
-                        lineType               = 2
-                                       
-                        # Draw bounding boxes
-                        for b in bboxes.index:
-                                                        
-                            box = bboxes.loc[[b]]
+                        x,y = int(box['xtl'].item()),int(box['ytl'].item()),
+                        w = int(box['xbr'].item()) - int(box['xtl'].item())
+                        h = int(box['ybr'].item()) - int(box['ytl'].item())
                         
-                            if box['confirmed'].item() != True:
-                                continue
-                            
-                            x,y = int(box['xtl'].item()),int(box['ytl'].item()),
-                            w = int(box['xbr'].item()) - int(box['xtl'].item())
-                            h = int(box['ybr'].item()) - int(box['ytl'].item())
-                            
-                            # Scale coordinates
-                            x = int(sf*x); y = int(sf*y); w = int(sf*w); h = int(sf*h)
-                            
-                            frame = cv2.rectangle(frame,
-                                                  (x,y),
-                                                  (x+w,y+h),
-                                                  (255,255,0),1)
-                            
-                            # Write score if it exists
-                            if box['score'].item() != -99:
-                                font = cv2.FONT_HERSHEY_SIMPLEX
-                                blxy = (x+1,y+10)
-                                fontScale              = 0.4
-                                fontColor              = (255,255,0)
-                                thickness              = 1
-                                lineType               = 2
-                                
-                                score = f'{box['score'].item():.2}'
-                                
-                                cv2.putText(frame,
-                                            score, 
-                                            blxy, 
-                                            font, 
-                                            fontScale,
-                                            fontColor,
-                                            thickness,
-                                            lineType)
-                                
-                        # Write the number of persons in the upper left corner
-                        num_persons = sum(bboxes['confirmed'] == True)
+                        # Scale coordinates
+                        x = int(sf*x); y = int(sf*y); w = int(sf*w); h = int(sf*h)
                         
-                        cv2.putText(frame,
-                                    f'Number of persons: {num_persons}', 
-                                    (0,20), 
-                                    font, 
-                                    fontScale,
-                                    fontColor,
-                                    thickness,
-                                    lineType)
+                        frame = cv2.rectangle(frame,
+                                              (x,y),
+                                              (x+w,y+h),
+                                              (255,255,0),1)
+                        
+                        # Write score if it exists
+                        if box['score'].item() != -99:
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            blxy = (x+1,y+10)
+                            fontScale              = 0.4
+                            fontColor              = (255,255,0)
+                            thickness              = 1
+                            lineType               = 2
+                            
+                            score = f'{box['score'].item():.2}'
+                            
+                            cv2.putText(frame,
+                                        score, 
+                                        blxy, 
+                                        font, 
+                                        fontScale,
+                                        fontColor,
+                                        thickness,
+                                        lineType)
+                            
+                    # Write the number of persons in the upper left corner
+                    num_persons = sum(bboxes['confirmed'] == True)
+                    
+                    cv2.putText(frame,
+                                f'Number of persons: {num_persons}', 
+                                (0,20), 
+                                font, 
+                                fontScale,
+                                fontColor,
+                                thickness,
+                                lineType)
 
-                            
-                    cv2.imshow(self.window_name,frame)
-                    cv2.waitKey(1)
-                
-                else:
-                    pass
-    
-                # Signal that processing on this item in the read_buffer is done
-                # self.read_buffer.task_done()
+                        
+                cv2.imshow(self.window_name,frame)
+                cv2.waitKey(1)
+            
+            else:
+                print('else')
+                pass
 
-            # The opencv window needs to be closed inside the run function,
-            # otherwise a window with the same name can never be opened until
-            # the console is restarted
-            if self._exit == True:
-                cv2.destroyWindow(self.window_name)
+            # Signal that processing on this item in the read_buffer is done
+            # self.read_buffer.task_done()
+
+        # The opencv window needs to be closed inside the run function,
+        # otherwise a window with the same name can never be opened until
+        # the console is restarted
+        if self._exit == True:
+            cv2.destroyWindow(self.window_name)
             
     def stop(self):
         self._exit = True
