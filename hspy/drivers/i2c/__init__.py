@@ -2,7 +2,8 @@ import sys
 import warnings
 
 if sys.platform == 'win32':
-    warnings.warn('I2C drivers not available on windows')
+    pass
+    # warnings.warn('I2C drivers not available on windows')
 
 if sys.platform == 'linux':
     from .drivers import I2C_Driver
