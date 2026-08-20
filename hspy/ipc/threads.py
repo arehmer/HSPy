@@ -29,6 +29,8 @@ from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
 from hspy.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 
+from hspy.drivers.i2c import I2C_HTPA32x32d
+
 
 
 class UDP_Client(WThread_R1):
@@ -130,6 +132,94 @@ class UDP_Client(WThread_R1):
         
     def stop(self):
         
+        # Set attribute exit to stop run method of thread
+        self._exit.set()
+
+
+class I2C_Client(WThread_R1):
+    """
+    Class for running I2C_HTPA32x32d in a thread. Analogous to UDP_Client:
+    the driver class only knows how to talk to the device (I2C bus reads,
+    calibration, LuT mapping), it holds no threading state of its own.
+    This thread class owns the loop and the write_buffer, and calls the
+    driver's acquire_frame() once per iteration.
+    """
+
+    def __init__(self,
+                 i2c_driver: I2C_HTPA32x32d,
+                 write_buffer: Queue,
+                 active_vdd: bool = True,
+                 blind_vdd: bool = False,
+                 applyCalib: bool = True,
+                 calcdK: bool = True,
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        i2c_driver : I2C_HTPA32x32d
+            Driver instance providing acquire_frame(). Must already be
+            open()'ed and init()'ed (this is done in I2C_HTPA32x32d.__init__).
+        write_buffer : Queue
+            Buffer that processed frames are put into for the downstream
+            thread to consume.
+        active_vdd, blind_vdd, applyCalib, calcdK :
+            Forwarded to i2c_driver.acquire_frame() on every iteration.
+
+        Returns
+        -------
+        None.
+
+        """
+
+        # Set I2C driver object as attribute
+        self.i2c_driver = i2c_driver
+
+        # Arguments forwarded to acquire_frame() every loop iteration
+        self.active_vdd = active_vdd
+        self.blind_vdd = blind_vdd
+        self.applyCalib = applyCalib
+        self.calcdK = calcdK
+
+        # Set image_id counter
+        self.image_id = 0
+
+        # Set time
+        self.t0 = time.time()
+
+        super().__init__(name='i2c_thread',
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _target(self):
+
+        # Dictionary for storing results in
+        result = {}
+
+        try:
+            # Acquire and process one frame from the sensor
+            data = self.i2c_driver.acquire_frame(active_vdd=self.active_vdd,
+                                                  blind_vdd=self.blind_vdd,
+                                                  applyCalib=self.applyCalib,
+                                                  calcdK=self.calcdK)
+
+            # Set success flag and store frame data
+            result['success'] = True
+            result.update(data)
+        except Exception as e:
+            # Set success flag to False in case of failure
+            result['success'] = False
+            print(f"[{self.name}] {e}")
+
+        # Store image_id
+        result['image_id'] = self.image_id
+
+        # Increment image_id
+        self.image_id = self.image_id + 1
+
+        return result
+
+    def stop(self):
+
         # Set attribute exit to stop run method of thread
         self._exit.set()
         
@@ -323,7 +413,7 @@ class Imshow(RThread_R1):
         # Get result from upstream thread
         data = self.read_buffer.get()
         
-        print(data.keys())
+        print(f"Received frame at {data['t']}")
         
         # Check success flag of upstream thread
         if data['success'] == True:
@@ -349,7 +439,7 @@ class Imshow(RThread_R1):
             annotations['confirmed'] = False
             annotations.loc[annotations['label']==1,'confirmed'] = True
             data['bboxes'] = annotations
-            print(annotations[['xtl','ytl','w','h','score']])
+
             
         else:
             # If upstream thread failed, set success flag to False
@@ -1043,4 +1133,3 @@ class FileWriter_Thread(RThread):
         upstream_dict = self.read_buffer.get()
     
         return upstream_dict
-
