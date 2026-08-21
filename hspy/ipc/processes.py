@@ -373,7 +373,8 @@ class CVProcess(RWProcess_R1):
 
             try:
                 data_processed = self.model.process({'frame': frame,
-                                                     'idx': data['image_id']})
+                                                     'idx': data['image_id']},
+                                                    update_bg = True)
                 data.update(data_processed)
 
             except Exception as e:
