@@ -56,7 +56,7 @@ from hspy.LuT import LuT
 from hspytools.tparray import TPArray
 import hsod
 from hsod.cv.detectors import build_detector
-from hsod.cv.detectors import build_tracktor
+from hsod.cv.tracktors import build_tracktor
 
 from hspy.ipc.processes_base import WProcess_R1, RProcess_R1, RWProcess_R1
 
