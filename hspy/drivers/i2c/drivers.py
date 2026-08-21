@@ -22,9 +22,6 @@ import struct
 import time
 from datetime import datetime
 from typing import List, Optional
-import smbus2
-import threading
-import queue
 import numpy as np
 
 from hspy.LuT import LuT
@@ -189,18 +186,11 @@ class I2C_HTPA32x32d(I2C_Driver):
         # Calibration constants (populated by load_calibration / init)
         self._calib: dict = {}
 
-        # Threading necessities
-        self.i2c_queue = queue.Queue(maxsize=1)        # bounded to avoid memory buildup
-        self.i2c_stop = threading.Event()              # if event is set, threads are killed
-        
         # Rolling stack buffers (depth 8) for stable averaging
         self._ptat_stack: List[float] = []
         self._vdd_stack:  List[float] = []
         self._el_offset_stack: List[List[int]] = []
         self._stack_depth = 8
-        
-        # Set a counter for the read frames
-        self._image_counter = 0
         
         # Open the I2C bus
         self.open()
@@ -326,68 +316,55 @@ class I2C_HTPA32x32d(I2C_Driver):
 
 
     
-    def _read_thread(self,
-                     active_vdd:bool = True,        # sample vdd when BLIND bit is not set
-                     blind_vdd:bool = False):       # sample vdd when BLIND bit is set
+    # ── Single-call frame acquisition (for use in a thread's loop body) ──────
+    def acquire_frame(self,
+                      active_vdd:bool = True,   # sample vdd when BLIND bit is not set
+                      blind_vdd:bool = False,   # sample vdd when BLIND bit is set
+                      applyCalib:bool = True,   # apply calibration for Ud compensation
+                      calcdK:bool = True) -> dict:      # apply LuT to Ud_comp
         """
-        Threadable function for i2c readouts 
-        """
-               
-        while not self.i2c_stop.is_set():
-            
-            data_dict = self.read_frame(active_vdd)                       # read pixels, ptat, vdd
-            data_dict.update(self.read_electrical_offsets(blind_vdd))     # read electrical offsets
-            
-            self.i2c_queue.put(data_dict)                                 # put in queue, blocks if full (backpressure)
+        Acquire and fully process one frame: reads the raw pixel data and
+        electrical offsets from the sensor over I2C, then converts/rearranges
+        the raw bytes and (optionally) applies calibration and the LuT.
 
-            # Increment counter
-            self._image_counter += 1
-            
-    def _processing_thread(self,
-                           active_vdd:bool = True,  # sample vdd when BLIND bit is not set
-                           blind_vdd:bool = False,  # sample vdd when BLIND bit is set
-                           applyCalib:bool=True,    # apply calibration for Ud compensation
-                           calcdK:bool=True):       # apply LuT to Ud_comp 
-        """
-        Threadable function for converting raw i2c data into the appropriate 
-        format (sorting, rearranging, conversion)
-        """
-        
-        timeout = self._calib['t_fr4'] * 4 / 1e3 * 1.1                 # ms, timeout is frame conversion time + 10 %, if no item is in the queue until then, something is wrong
-        
-        while not self.i2c_stop.is_set():
-            
-            try:
-                data = self.i2c_queue.get(timeout=timeout)         # blocks until data arrives, or times out
+        This bundles what used to be two internally-threaded steps
+        (``_read_thread`` + ``_processing_thread``) into a single blocking
+        call, so it is intended to be called once per loop iteration by an
+        externally-owned thread class - analogous to how
+        ``HTPA_UDPReader.read_continuous_bytestream()`` is called from
+        within ``UDP_Client``.
 
-                data = self.convert_i2c_data(data,
-                                             active_vdd,
-                                             blind_vdd)                 # convert and rearrange raw i2c data
-                
-                if applyCalib:
-                    
-                    # Calculcates Temperatures from pixel voltages given cali-
-                    # bration data from EEPROM
-                    data = self.apply_calib(data)
-                    
-                if calcdK:
-                    
-                    data = self.apply_LuT(data)
-                
-                # Set success flag
-                data['success'] = True
-                
-                # Add a image counter
-                data['image_id'] = self._image_counter
-                                
-                self.output_queue.put(data)
-                    
-            except queue.Empty:
-                continue                                          # no data yet, loop and check stop_event
-                
-            except Exception as e:
-                print(f"[processing_thread] {e}")                
-    
+        Parameters
+        ----------
+        active_vdd, blind_vdd : see read_frame() / read_electrical_offsets()
+        applyCalib : if True, apply EEPROM calibration (apply_calib)
+        calcdK     : if True, apply the LuT to the calibrated voltages
+                    (apply_LuT). Requires applyCalib=True and self.LuT to be set.
+
+        Returns
+        -------
+        dict
+            Raw + converted (+ calibrated / LuT-mapped) frame data. Does
+            NOT contain a 'success' or 'image_id' key - the calling thread
+            is responsible for adding those, the same way UDP_Client does.
+        """
+        data = self.read_frame(active_vdd)                        # read pixels, ptat, vdd
+        data.update(self.read_electrical_offsets(blind_vdd))      # read electrical offsets
+
+        data = self.convert_i2c_data(data,
+                                     active_vdd,
+                                     blind_vdd)                    # convert and rearrange raw i2c data
+
+        if applyCalib:
+            # Calculates Temperatures from pixel voltages given cali-
+            # bration data from EEPROM
+            data = self.apply_calib(data)
+
+        if calcdK:
+            data = self.apply_LuT(data)
+
+        return data
+
     def convert_i2c_data(self,
                          data:dict, 
                          active_vdd:bool,
@@ -488,37 +465,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         return data
     
-    # ── Continuous frame readout  ────────────────────────────────────────────
-    def start_i2cstream(self):
-        """
-        Acquire complete frames in a loop
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        if self.output_queue is None:
-            raise RuntimeError("Set an output queue before starting the stream.")
-        
-        self.i2c_stop.clear()
-        
-        self._t_reader = threading.Thread(target=self._read_thread,
-                                          daemon = True)
-        self._t_processor = threading.Thread(target=self._processing_thread,
-                                             daemon = True)
-        
-        self._t_reader.start()
-        self._t_processor.start()
-       
-        
-    def stop_i2cstream(self):
-        
-        self.i2c_stop.set()
-        self._t_reader.join()
-        self._t_processor.join()
-
     # ── Single Frame readout ─────────────────────────────────────────────────
 
     def read_frame(self, measure_vdd: bool = False) -> dict:
