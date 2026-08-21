@@ -372,6 +372,7 @@ class CVProcess(RWProcess_R1):
                 frame = frame.reshape(self.tparray._npsize)
 
             try:
+                print(frame)
                 data_processed = self.model.process({'frame': frame,
                                                      'idx': data['image_id']})
                 data.update(data_processed)
