@@ -229,6 +229,7 @@ class TPArray():
         elif (self.SensorType == SensorTypes['HTPA32x32dR2_L1k7_0k8_THiC_Si']):
             self.ArrayType = ArrayTypes['HTPA32x32dR2']
             self._radio_r = 14 + 2      # radiometric radius in pixel plus 2
+            self._fs = 7.1              # Hz, recorded with WiFi Appset
         elif self.SensorType is None:
             self.ArrayType = None
         else:
@@ -351,7 +352,6 @@ class TPArray():
             
             self._package_num = 1
             self._package_size = 262
-            self._fs = 160
             self._NETD = 100
             self.Pitch = 90.0e-6
             self.Ampl = 40
@@ -369,7 +369,6 @@ class TPArray():
             
             self._package_num = 1
             self._package_size = 780
-            self._fs = 70
             self._NETD = 130
             self.Pitch = 90.0e-6    #equal for r3
             self.Ampl = 40          #equal for r3  
@@ -386,7 +385,6 @@ class TPArray():
 
             self._package_num = 2
             self._package_size = 1292
-            self._fs = 27
             self.Pitch = 90.0e-6
             self.Ampl = 40            
 
@@ -402,7 +400,6 @@ class TPArray():
 
             self._package_num = 10
             self._package_size = 1283
-            self._fs = 41
             self._NETD = 70
             
             
@@ -419,7 +416,6 @@ class TPArray():
 
             self._package_num = 10
             self._package_size = 1283
-            self._fs = 41
             self._NETD = 70
             self.Pitch = 60.0e-6
             self.Ampl = 60               
@@ -437,7 +433,6 @@ class TPArray():
 
             self._package_num = 5
             self._package_size = 1159
-            self._fs = 47
             self._NETD = 90
             self.Pitch = 45.0e-6
             self.Ampl = 60               
@@ -454,7 +449,6 @@ class TPArray():
 
             self._package_num = 17
             self._package_size = 1401
-            self._fs = 20
             self._NETD = 130
             self.Pitch = 60.0e-6
             self.Ampl = 60                           
@@ -472,7 +466,6 @@ class TPArray():
 
             self._package_num = 30
             self._package_size = 1401
-            self._fs = 25
             self._NETD = 110
             self.Pitch = 45.0e-6        #equal for r1
             self.Ampl = 60              #40 for r1         
