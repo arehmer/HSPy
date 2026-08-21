@@ -347,7 +347,7 @@ class CVProcess(RWProcess_R1):
             print(f'Provided model {name} could not be identified.')
             return None
 
-        self.tparray = TPArray(SensorType=self.detector.SensorType)
+        self.tparray = TPArray(SensorType=self.model.SensorType)
 
         self.num_pix = len(self.tparray._pix)
 
