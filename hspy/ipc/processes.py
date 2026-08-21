@@ -54,7 +54,9 @@ import numpy as np
 
 from hspy.LuT import LuT
 from hspytools.tparray import TPArray
+import hsod
 from hsod.cv.detectors import build_detector
+from hsod.cv.detectors import build_tracktor
 
 from hspy.ipc.processes_base import WProcess_R1, RProcess_R1, RWProcess_R1
 
@@ -288,7 +290,7 @@ class I2C_ClientProcess(WProcess_R1):
         self._exit.set()
 
 
-class ProposalDetectorProcess(RWProcess_R1):
+class CVProcess(RWProcess_R1):
     """
     Multiprocessing version of ProposalDetectorThread (ProcessorThread.py).
     Reads frames from read_buffer, runs object detection, writes the
@@ -297,16 +299,17 @@ class ProposalDetectorProcess(RWProcess_R1):
 
     def __init__(self,
                  name: str,
-                 detector_dict: dict,
+                 model_dict: dict,
                  write_buffer,
                  read_buffer,
                  **kwargs):
         """
         Parameters
         ----------
-        detector_dict : dict
-            Kwargs passed to build_detector(**detector_dict) inside
-            _setup(). The detector is built inside the child process
+        model_dict : dict
+            Kwargs passed to build_detector(**model_dict) or 
+            build_tracktor(**model_dict )inside
+            _setup(). The detector/tracktor is built inside the child process
             rather than being constructed in the parent and pickled
             across, since detector/model objects frequently hold
             resources (loaded weights, a GPU/inference context, ...)
@@ -320,7 +323,7 @@ class ProposalDetectorProcess(RWProcess_R1):
 
         """
 
-        self.detector_dict = detector_dict
+        self.model_dict = model_dict
 
         super().__init__(name=name,
                          read_buffer=read_buffer,
@@ -328,10 +331,21 @@ class ProposalDetectorProcess(RWProcess_R1):
                          **kwargs)
 
     def _setup(self):
-
-        # Build the detector (load weights / params, allocate whatever
-        # runtime context it needs) here, inside the child process.
-        self.detector = build_detector(**self.detector_dict)
+        
+        # Check if the provided model is a detector or tracker by name
+        # and build the model (load weights / params, allocate whatever
+        # runtime context it needs) here, inside the child process
+        name = self.model_dict['name']  
+        
+        if name in hsod.cv.detectors.get_classes():
+            print(f'Provided model {name} identified as detector.')
+            self.model = build_detector(**self.model_dict)
+        elif name in hsod.cv.tracktors.get_classes():
+            print(f'Provided model {name} identified as tracktor.')
+            self.model = build_tracktor(**self.model_dict)
+        else:
+            print(f'Provided model {name} could not be identified.')
+            return None
 
         self.tparray = TPArray(SensorType=self.detector.SensorType)
 
@@ -358,8 +372,8 @@ class ProposalDetectorProcess(RWProcess_R1):
                 frame = frame.reshape(self.tparray._npsize)
 
             try:
-                data_processed = self.detector.process({'frame': frame,
-                                                         'idx': data['image_id']})
+                data_processed = self.model.process({'frame': frame,
+                                                     'idx': data['image_id']})
                 data.update(data_processed)
 
             except Exception as e:
