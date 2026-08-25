@@ -57,36 +57,57 @@ class HS_USBCom:
             devices = list(usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,
                                         find_all=True, backend=backend))
             self.dev = None
+            warnings = []  # Warnungen sammeln, erstmal nicht ausgeben
             for d in devices:
                 try:
-                    # set_configuration() first, then read string descriptor
-                    if sys.platform != 'win32':
-                        if d.is_kernel_driver_active(0):
-                            d.detach_kernel_driver(0)
-                    d.set_configuration()
-                    sn = usb.util.get_string(d, d.iSerialNumber)
+                    # read serial number WITHOUT set_configuration()
+                    sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)
                     if sn == self.serial_number:
                         self.dev = d
                         break
                     else:
                         usb.util.dispose_resources(d)  # not the required device, free
                 except Exception as e:
-                    print(f"Warning at read of SN: {e}")
+                    warnings.append(f"Warning at read of SN: {e}")
+                    usb.util.dispose_resources(d)  # free even on error
                     continue
-        else:
-            self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct, backend=backend)
+
+            if self.dev is None:
+                # jetzt erst Warnungen ausgeben - echtes Problem
+                for w in warnings:
+                    print(w)                
+                raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X}, SN={})".format(
+                    self.idVendor, self.idProduct, self.serial_number))
+
             # Kernel-driver only relevant for Linux
             if sys.platform != 'win32':
                 if self.dev.is_kernel_driver_active(0):
                     self.dev.detach_kernel_driver(0)
-                # #access must be granted, create rule: 
-                # #sudo nano /etc/udev/rules.d/99-htpa.rules
-                # #content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"                    
-            self.dev.set_configuration()
 
-        if self.dev is None:
-            raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X}, SN={})".format(
-                self.idVendor, self.idProduct, self.serial_number))
+            # set_configuration() only for the found device, with retry
+            for attempt in range(5):
+                try:
+                    self.dev.set_configuration()
+                    break
+                except usb.core.USBError as e:
+                    if attempt < 4:
+                        print(f"set_configuration attempt {attempt+1} failed, retrying...")
+                        time.sleep(0.3)
+                    else:
+                        raise
+
+        else:
+            self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct, backend=backend)
+            if self.dev is None:
+                raise ValueError("Device not found!")
+            # Kernel-driver only relevant for Linux
+            if sys.platform != 'win32':
+                if self.dev.is_kernel_driver_active(0):
+                    self.dev.detach_kernel_driver(0)
+                # access must be granted, create rule:
+                # sudo nano /etc/udev/rules.d/99-htpa.rules
+                # content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
+            self.dev.set_configuration()
 
         # Endpoints ermitteln
         cfg = self.dev.get_active_configuration()
@@ -201,6 +222,30 @@ class HS_USBCom:
 
         except usb.core.USBError as e:
             print("USB error at frame-read: {}".format(e))
+            return None   
+
+    def read_frame_raw(self, max_bytes=1024, timeout=None):
+        """Liest einen rohen Chunk ohne Sync-Prüfung"""
+        t = timeout if timeout is not None else self.timeout
+        try:
+            chunk = self.ep_in.read(max_bytes, timeout=t)
+            return bytes(chunk)
+        except usb.core.USBTimeoutError:
+            return None
+        except usb.core.USBError as e:
+            print(f"USB error at chunk read: {e}")
+            return None  
+
+    def read_raw_response(self, timeout=None):
+        """Liest eine Text-Response ohne vorher etwas zu senden"""
+        t = timeout if timeout is not None else self.timeout
+        try:
+            answer = self.ep_in.read(1024, timeout=t)
+            return bytes(answer).decode('utf-8', errors='replace')
+        except usb.core.USBTimeoutError:
+            return None
+        except usb.core.USBError as e:
+            print(f"USB error at raw response read: {e}")
             return None        
 
     # Context Manager Support
