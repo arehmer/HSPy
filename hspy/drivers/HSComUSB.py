@@ -47,7 +47,6 @@ class HS_USBCom:
 
 
     def open(self):
-#<<<<<<< Updated upstream
         # explicit giving Backend, should work on Windows and Linux
         backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
         if backend is None:
@@ -85,7 +84,7 @@ class HS_USBCom:
                 if self.dev.is_kernel_driver_active(0):
                     self.dev.detach_kernel_driver(0)
 
-#<<<<<<< HEAD
+
             # set_configuration() only for the found device, with retry
             for attempt in range(5):
                 try:
@@ -110,33 +109,7 @@ class HS_USBCom:
                 # sudo nano /etc/udev/rules.d/99-htpa.rules
                 # content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
             self.dev.set_configuration()
-# =======
-        if self.dev is None:
-            raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X}, SN={})".format(
-                self.idVendor, self.idProduct, self.serial_number))
-# =======
-#         linux = False
-#         windows = True
-#         if linux:
-#             self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct)
-#         elif windows:
-#             backend=usb.backend.libusb1.get_backend(find_library = lambda x:"C:/Users/Rehmer/AppData/Local/Programs/Python/Python312/envs/cv2/Lib/site-packages/libusb/_platform/windows/x86_64/libusb-1.0.dll")
-#             self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct,
-#                                       backend = backend)
-#         if self.dev is None:
-#             raise ValueError("Device not found! (VID=0x{:04X}, PID=0x{:04X})".format(
-#                 self.idVendor, self.idProduct))
 
-#         if self.dev.is_kernel_driver_active(0):
-#             self.dev.detach_kernel_driver(0)
-            
-#         # #access must be granted, create rule: 
-#         # #sudo nano /etc/udev/rules.d/99-htpa.rules
-#         # #content: SUBSYSTEM=="usb", ATTRS{idVendor}=="32a7", ATTRS{idProduct}=="0003", MODE="0666"
-
-#         self.dev.set_configuration()
-# >>>>>>> Stashed changes
-# >>>>>>> 3115a07d983a9721bf8f33f886c7a4d774bad13a
 
         # Endpoints ermitteln
         cfg = self.dev.get_active_configuration()
