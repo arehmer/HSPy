@@ -6,6 +6,8 @@ Created on Thu Feb  8 16:13:39 2024
 """
 import time
 import cv2
+import socket
+import struct
 
 from queue import Queue
 from threading import Condition
@@ -23,11 +25,15 @@ from hspytools.tparray import TPArray
 
 from collections import deque
 
-from hspytools.ipc.threads_base import WThread,RThread, RThread_R1
-from hspytools.readers import HTPA_UDPReader
+from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
+from hspy.readers import HTPA_UDPReader
 from hspytools.tparray import TPArray
 
-class UDP(WThread):
+from hspy.drivers.i2c import I2C_HTPA32x32d
+
+
+
+class UDP_Client(WThread_R1):
     """
     Class for running HTPA_UDP_Reader in a thread. Can only bind one device
     at this point
@@ -36,7 +42,6 @@ class UDP(WThread):
     def __init__(self,
                  udp_reader:HTPA_UDPReader,
                  write_buffer:Queue,
-                 write_condition:Condition,
                  IP:str = '',
                  DevID:int = -1,
                  Bcast_Addr:str = '',
@@ -92,12 +97,11 @@ class UDP(WThread):
         # Set time
         self.t0 = time.time()
         
-        super().__init__(target = self._target_function,
+        super().__init__(name = 'udp_thread',
                          write_buffer = write_buffer,
-                         write_condition = write_condition,
                          **kwargs)
             
-    def _target_function(self):
+    def _target(self):
         
         # print('Executed upd thread: ' + str(time.time()-self.t0) )
         
@@ -129,22 +133,256 @@ class UDP(WThread):
     def stop(self):
         
         # Set attribute exit to stop run method of thread
-        self._exit = True
+        self._exit.set()
+
+
+class I2C_Client(WThread_R1):
+    """
+    Class for running I2C_HTPA32x32d in a thread. Analogous to UDP_Client:
+    the driver class only knows how to talk to the device (I2C bus reads,
+    calibration, LuT mapping), it holds no threading state of its own.
+    This thread class owns the loop and the write_buffer, and calls the
+    driver's acquire_frame() once per iteration.
+    """
+
+    def __init__(self,
+                 i2c_driver: I2C_HTPA32x32d,
+                 write_buffer: Queue,
+                 active_vdd: bool = True,
+                 blind_vdd: bool = False,
+                 applyCalib: bool = True,
+                 calcdK: bool = True,
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        i2c_driver : I2C_HTPA32x32d
+            Driver instance providing acquire_frame(). Must already be
+            open()'ed and init()'ed (this is done in I2C_HTPA32x32d.__init__).
+        write_buffer : Queue
+            Buffer that processed frames are put into for the downstream
+            thread to consume.
+        active_vdd, blind_vdd, applyCalib, calcdK :
+            Forwarded to i2c_driver.acquire_frame() on every iteration.
+
+        Returns
+        -------
+        None.
+
+        """
+
+        # Set I2C driver object as attribute
+        self.i2c_driver = i2c_driver
+
+        # Arguments forwarded to acquire_frame() every loop iteration
+        self.active_vdd = active_vdd
+        self.blind_vdd = blind_vdd
+        self.applyCalib = applyCalib
+        self.calcdK = calcdK
+
+        # Set image_id counter
+        self.image_id = 0
+
+        # Set time
+        self.t0 = time.time()
+
+        super().__init__(name='i2c_thread',
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _target(self):
+
+        # Dictionary for storing results in
+        result = {}
+
+        try:
+            # Acquire and process one frame from the sensor
+            data = self.i2c_driver.acquire_frame(active_vdd=self.active_vdd,
+                                                  blind_vdd=self.blind_vdd,
+                                                  applyCalib=self.applyCalib,
+                                                  calcdK=self.calcdK)
+
+            # Set success flag and store frame data
+            result['success'] = True
+            result.update(data)
+        except Exception as e:
+            # Set success flag to False in case of failure
+            result['success'] = False
+            print(f"[{self.name}] {e}")
+
+        # Store image_id
+        result['image_id'] = self.image_id
+
+        # Increment image_id
+        self.image_id = self.image_id + 1
+
+        return result
+
+    def stop(self):
+
+        # Set attribute exit to stop run method of thread
+        self._exit.set()
         
         # Stop the stream
         self.udp_reader.stop_continuous_bytestream(DevID = self.DevID)
         
         # Release the array
-        self.udp_reader.release_tparray(self.DevID)     
-        
-class Imshow(RThread):
+        self.udp_reader.release_tparray(self.DevID)
+
+
+# Header put in front of every UDP datagram sent by UDP_PickleServer /
+# consumed by UDP_PickleClient: message id, index of this chunk, total
+# number of chunks the message was split into.
+_PICKLE_HEADER_FMT = '!IHH'
+_PICKLE_HEADER_SIZE = struct.calcsize(_PICKLE_HEADER_FMT)
+
+# Stay safely below the 65507 byte payload limit of a UDP datagram
+_PICKLE_MAX_CHUNK = 60000
+
+
+class UDP_PickleServer(RThread_R1):
+    """
+    Thread that reads arbitrary (picklable) data - e.g. a dict containing
+    a numpy array and a pandas DataFrame - from an upstream buffer and
+    sends it out via UDP to a single peer running a UDP_PickleClient.
+
+    Since a pickled payload can easily exceed the size of a single UDP
+    datagram, it is split into numbered chunks that are reassembled by
+    the receiving UDP_PickleClient. As with any data sent over UDP,
+    delivery is not guaranteed: a message of which one or more chunks
+    are lost in transit is silently dropped by the receiver.
+    """
+
+    def __init__(self,
+                 name:str,
+                 read_buffer:Queue,
+                 target_ip:str,
+                 target_port:int,
+                 **kwargs):
+
+        self.target_addr = (target_ip, target_port)
+
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self._msg_id = 0
+
+        super().__init__(name = name,
+                         read_buffer = read_buffer,
+                         **kwargs)
+
+    def _target(self):
+
+        # Get data (e.g. a dict with a numpy array / pandas DataFrame)
+        # from the upstream buffer
+        data = self.read_buffer.get()
+
+        # Serialize it
+        payload = pkl.dumps(data)
+
+        # Split the payload into chunks that fit into a single UDP
+        # datagram
+        chunks = [payload[i:i + _PICKLE_MAX_CHUNK]
+                 for i in range(0, len(payload), _PICKLE_MAX_CHUNK)] or [b'']
+
+        chunk_count = len(chunks)
+
+        # Send every chunk in its own datagram, prefixed with a header
+        # that allows the receiver to reassemble the message
+        for chunk_index, chunk in enumerate(chunks):
+            header = struct.pack(_PICKLE_HEADER_FMT,
+                                 self._msg_id,
+                                 chunk_index,
+                                 chunk_count)
+            self._socket.sendto(header + chunk, self.target_addr)
+
+        # Increment (and wrap) the message id
+        self._msg_id = (self._msg_id + 1) % 2**32
+
+        return None
+
+    def stop(self):
+        super().stop()
+        self._socket.close()
+
+
+class UDP_PickleClient(WThread_R1):
+    """
+    Thread that receives data sent by a UDP_PickleServer instance,
+    reassembles and unpickles it, and writes the resulting object
+    (e.g. a dict containing a numpy array and a pandas DataFrame) into
+    a buffer for downstream threads to consume.
+    """
+
+    def __init__(self,
+                 name:str,
+                 write_buffer:Queue,
+                 listen_ip:str = '0.0.0.0',
+                 listen_port:int = 0,
+                 timeout:float = 1.0,
+                 **kwargs):
+
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind((listen_ip, listen_port))
+        self._socket.settimeout(timeout)
+
+        # Chunks of messages that have not been fully received yet,
+        # keyed by message id
+        self._pending = {}
+
+        super().__init__(name = name,
+                         write_buffer = write_buffer,
+                         **kwargs)
+
+    @property
+    def listen_addr(self):
+        return self._socket.getsockname()
+
+    def _target(self):
+
+        # Keep listening until either a full message has been
+        # reassembled or the thread is stopped
+        while not self._exit.is_set():
+
+            try:
+                packet, _addr = self._socket.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                # Socket was closed (e.g. during shutdown) while blocked in recvfrom
+                break
+
+            header = packet[:_PICKLE_HEADER_SIZE]
+            chunk = packet[_PICKLE_HEADER_SIZE:]
+
+            msg_id, chunk_index, chunk_count = struct.unpack(_PICKLE_HEADER_FMT,
+                                                              header)
+
+            chunks = self._pending.setdefault(msg_id, {})
+            chunks[chunk_index] = chunk
+
+            # Once every chunk of this message has arrived, reassemble
+            # it in order and hand it back to be put in the write buffer
+            if len(chunks) == chunk_count:
+                payload = b''.join(chunks[i] for i in range(chunk_count))
+                del self._pending[msg_id]
+                return pkl.loads(payload)
+
+        return None
+
+    def stop(self):
+        super().stop()
+        self._socket.close()
+
+
+class Imshow(RThread_R1):
     """
     Class for plotting frames and possibly bounding boxes in a thread.
     """
     
     def __init__(self,
+                 name :str,
                  read_buffer:Queue,
-                 read_condition:Condition,
                  ArrayType:int = None,
                  SensorType:int = None,
                  **kwargs):
@@ -164,27 +402,25 @@ class Imshow(RThread):
         self.t0 = time.time()
         
         # Call parent class
-        super().__init__(target = self._target_function,
+        super().__init__(name = name,
                          read_buffer = read_buffer,
-                         read_condition = read_condition,
                          **kwargs)
     
-    def _target_function(self):
+    def _target(self):
         
         # print('Executed imshow thread: ' + str(time.time()-self.t0) )
         
         # Get result from upstream thread
-        result = self.read_buffer.get()
-
+        data = self.read_buffer.get()
+        
+        print(f"Received frame at {data['t']}")
+        
         # Check success flag of upstream thread
-        if result['success'] == True:
-
-            # if 'frame_proc' in list(result.keys()):
-            #     frame = result['frame_proc']
-            # else:
-            #     frame = result['frame']
+        if data['success'] == True:
+            
+                    
                 
-            frame = result['frame']
+            frame = data['pix_dK']
     
             # Reshape if not the proper size
             if frame.ndim == 1:
@@ -196,128 +432,125 @@ class Imshow(RThread):
             frame = frame.astype(np.uint8)
             
             # Save to dict
-            result['frame_plot'] = frame 
+            data['frame_plot'] = frame 
+            
+            # Write annotations to dict
+            annotations = data['annot_frame'].annotations
+            annotations['confirmed'] = False
+            annotations.loc[annotations['label']==1,'confirmed'] = True
+            data['bboxes'] = annotations
+
             
         else:
             # If upstream thread failed, set success flag to False
-            result['success'] = False
+            data['success'] = False
 
             
-        return result
+        return data
     
     def run(self):
         
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         
         # Check if thread has been stopped
-        while self._exit == False:
+        while not self._exit.is_set():
             
-            # Acquire the read condition
-            with self.read_condition:
+            # Execute target function
+            data = self._target()
             
-                # Wait until the upstream thread notifies this thread
-                while self.read_buffer.empty():
-                    self.read_condition.wait()
-            
-                # Execute target function
-                result = self._target()
+            # Check success flag of upstream thread
+            if data['success'] is True:
                 
-                # Notify the upstream thread, that the item has been retrieved
-                # from the buffer and processed
-                self.read_condition.notify()
+                # Get frame (processed)
+                frame = data['frame_plot']
                 
-                # Check success flag of upstream thread
-                if result['success'] is True:
+                # Scale it up by a factor of 5
+                sf = 10
+                # frame = cv2.resize(frame, (0,0), fx=sf, fy=sf) 
+                frame = np.repeat(np.repeat(frame, sf, axis=0), sf, axis=1)
+                
+                # Convert frame to RGB to be able to plot colored 
+                # boxes
+                frame = cv2.cvtColor(frame,cv2.COLOR_GRAY2RGB)
+                
+                # Get bboxes if available
+                if 'bboxes' in data.keys():
+                    bboxes = data['bboxes']
                     
-                    # Get frame (processed)
-                    frame = result['frame_plot']
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    fontScale              = 0.4
+                    fontColor              = (255,255,0)
+                    thickness              = 1
+                    lineType               = 2
+                                   
+                    # Draw bounding boxes
+                    for b in bboxes.index:
+                                                    
+                        box = bboxes.loc[[b]]
                     
-                    # Scale it up by a factor of 5
-                    sf = 10
-                    # frame = cv2.resize(frame, (0,0), fx=sf, fy=sf) 
-                    frame = np.repeat(np.repeat(frame, sf, axis=0), sf, axis=1)
-                    
-                    # Convert frame to RGB to be able to plot colored 
-                    # boxes
-                    frame = cv2.cvtColor(frame,cv2.COLOR_GRAY2RGB)
-                    
-                    # Get bboxes if available
-                    if 'bboxes' in result.keys():
-                        bboxes = result['bboxes']
+                        if box['confirmed'].item() != True:
+                            continue
                         
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        fontScale              = 0.4
-                        fontColor              = (255,255,0)
-                        thickness              = 1
-                        lineType               = 2
-                                       
-                        # Draw bounding boxes
-                        for b in bboxes.index:
-                                                        
-                            box = bboxes.loc[[b]]
+                        x,y = int(box['xtl'].item()),int(box['ytl'].item()),
+                        w = int(box['xbr'].item()) - int(box['xtl'].item())
+                        h = int(box['ybr'].item()) - int(box['ytl'].item())
                         
-                            if box['confirmed'].item() != True:
-                                continue
-                            
-                            x,y = int(box['xtl'].item()),int(box['ytl'].item()),
-                            w = int(box['xbr'].item()) - int(box['xtl'].item())
-                            h = int(box['ybr'].item()) - int(box['ytl'].item())
-                            
-                            # Scale coordinates
-                            x = int(sf*x); y = int(sf*y); w = int(sf*w); h = int(sf*h)
-                            
-                            frame = cv2.rectangle(frame,
-                                                  (x,y),
-                                                  (x+w,y+h),
-                                                  (255,255,0),1)
-                            
-                            # Write score if it exists
-                            if box['score'].item() != -99:
-                                font = cv2.FONT_HERSHEY_SIMPLEX
-                                blxy = (x+1,y+10)
-                                fontScale              = 0.4
-                                fontColor              = (255,255,0)
-                                thickness              = 1
-                                lineType               = 2
-                                
-                                score = f'{box['score'].item():.2}'
-                                
-                                cv2.putText(frame,
-                                            score, 
-                                            blxy, 
-                                            font, 
-                                            fontScale,
-                                            fontColor,
-                                            thickness,
-                                            lineType)
-                                
-                        # Write the number of persons in the upper left corner
-                        num_persons = sum(bboxes['confirmed'] == True)
+                        # Scale coordinates
+                        x = int(sf*x); y = int(sf*y); w = int(sf*w); h = int(sf*h)
                         
-                        cv2.putText(frame,
-                                    f'Number of persons: {num_persons}', 
-                                    (0,20), 
-                                    font, 
-                                    fontScale,
-                                    fontColor,
-                                    thickness,
-                                    lineType)
+                        frame = cv2.rectangle(frame,
+                                              (x,y),
+                                              (x+w,y+h),
+                                              (255,255,0),1)
+                        
+                        # Write score if it exists
+                        if box['score'].item() != -99:
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            blxy = (x+1,y+10)
+                            fontScale              = 0.4
+                            fontColor              = (255,255,0)
+                            thickness              = 1
+                            lineType               = 2
+                            
+                            score = f'{box['score'].item():.2}'
+                            
+                            cv2.putText(frame,
+                                        score, 
+                                        blxy, 
+                                        font, 
+                                        fontScale,
+                                        fontColor,
+                                        thickness,
+                                        lineType)
+                            
+                    # Write the number of persons in the upper left corner
+                    num_persons = sum(bboxes['confirmed'] == True)
+                    
+                    cv2.putText(frame,
+                                f'Number of persons: {num_persons}', 
+                                (0,20), 
+                                font, 
+                                fontScale,
+                                fontColor,
+                                thickness,
+                                lineType)
 
-                            
-                    cv2.imshow(self.window_name,frame)
-                    cv2.waitKey(1)
-                
-                else:
-                    pass
-    
-                # Signal that processing on this item in the read_buffer is done
-                # self.read_buffer.task_done()
+                        
+                cv2.imshow(self.window_name,frame)
+                cv2.waitKey(1)
+            
+            else:
+                print('else')
+                pass
 
-            # The opencv window needs to be closed inside the run function,
-            # otherwise a window with the same name can never be opened until
-            # the console is restarted
-            if self._exit == True:
-                cv2.destroyWindow(self.window_name)
+            # Signal that processing on this item in the read_buffer is done
+            # self.read_buffer.task_done()
+
+        # The opencv window needs to be closed inside the run function,
+        # otherwise a window with the same name can never be opened until
+        # the console is restarted
+        if self._exit == True:
+            cv2.destroyWindow(self.window_name)
             
     def stop(self):
         self._exit = True
@@ -370,17 +603,6 @@ class DataRecord(RThread_R1):
         self._init_rec_dir()
        
         
-       # self.save_keys = ['bboxes','frame']                                     # Keys of values in the received data that are to be written to files
-        # self.rec_dir = None                                                     # Directory within save_dir, where recorded data is saved. Created automatically.
-        # self.file_path = {}                                                     # Dictionary of file paths
-        
-        # Set time
-        # self.t0 = time.time() 
-        
-        # self.imshow = imshow                                                    # Show the sensor stream
-        # self.window_name = kwargs.pop('window_name','Sensor stream')            # Name of the window the stream is shown in
-        
-
     def _init_rec_dir(self):
         '''
         Create a folder within save_dir, in which the recorded data is stored.
@@ -420,6 +642,7 @@ class DataRecord(RThread_R1):
             timestamp = data['t']
         else:
             timestamp = datetime.now()
+            data['t'] = timestamp
         
         # Make a filename
         filename = self.make_filename(self.counter,
@@ -910,4 +1133,3 @@ class FileWriter_Thread(RThread):
         upstream_dict = self.read_buffer.get()
     
         return upstream_dict
-

@@ -29,6 +29,9 @@ class RWThread_R1(Thread):
         self.write_buffer = write_buffer
         
         self._exit = Event()
+        
+        self.daemon = True  # dies automatically if main thread exits
+
 
         
     
@@ -40,10 +43,10 @@ class RWThread_R1(Thread):
             try:
                 
                 # Retrieve data
-                data_upstream = self.read_buffer.get(timeout=1.0)  # blocks until data arrives
+                # data_upstream = self.read_buffer.get(timeout=1.0)  # blocks until data arrives
                 
                 # Process data
-                result = self._target(data_upstream)
+                result = self._target()
                 
                 # Put result into downstream buffer
                 self.write_buffer.put(result)
@@ -319,7 +322,7 @@ class RThread_R1(Thread):
         
         # Check if thread has been stopped
         while not self._exit.is_set():
-            
+
             try:
                 # Execute target function
                 result = self._target()
