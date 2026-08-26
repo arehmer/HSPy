@@ -5,6 +5,7 @@ import libusb_package
 import re
 import numpy as np
 import sys
+import time
 
 # pip install libusb
 # pip install libusb-package
@@ -23,26 +24,40 @@ class HS_USBCom:
         self.SYNC_WORD_1 = 0xF046
 
     @staticmethod
-    def find_all_devices(idVendor=0x32a7, idProduct=0x0003):
+    def find_all_devices(idVendor=0x32a7, idProduct=0x0003, retries=3):
         """Returns list of all found serial numbers of the specific device"""
         backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
-        devices = list(usb.core.find(idVendor=idVendor, idProduct=idProduct,
-                                    find_all=True, backend=backend))
-        serials = []
-        for d in devices:
-            sn=None
-            try:
-                sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)     # 0x0409 = English
-                print(f"Found: VID=0x{idVendor:04X} PID=0x{idProduct:04X} SN={sn}")
-            except Exception as e:
-                print(f"Warning reading SN: {e}")
-            finally:
+
+        for attempt in range(retries):
+            devices = list(usb.core.find(idVendor=idVendor, idProduct=idProduct,
+                                        find_all=True, backend=backend))
+            serials = []
+            warnings = []
+            for d in devices:
+                sn=None
                 try:
-                    usb.util.dispose_resources(d)  # free, will be opened in open() again
-                except Exception:
-                    pass
-            if sn is not None:  #only pass correct serials
-                serials.append(sn)
+                    sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)     # 0x0409 = English
+                    print(f"Found: VID=0x{idVendor:04X} PID=0x{idProduct:04X} SN={sn}")
+                except Exception as e:
+                    warnings.append(f"Warning reading SN: {e}")
+                finally:
+                    try:
+                        usb.util.dispose_resources(d)  # free, will be opened in open() again
+                    except Exception:
+                        pass
+                if sn is not None:  #only pass correct serials
+                    serials.append(sn)
+            if serials:
+                return serials  # mindestens ein Gerät gefunden     
+            # kein Gerät gefunden - evtl. noch nicht freigegeben
+            if attempt < retries - 1:
+                print(f"No devices found (attempt {attempt+1}/{retries}), retrying in 1s...")
+                for w in warnings:
+                    print(w)
+                time.sleep(1.0)                           
+        # alle Versuche fehlgeschlagen
+        for w in warnings:
+            print(w)
         return serials
 
 
@@ -59,18 +74,39 @@ class HS_USBCom:
             self.dev = None
             warnings = []  # Warnungen sammeln, erstmal nicht ausgeben
             for d in devices:
-                try:
-                    # read serial number WITHOUT set_configuration()
-                    sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)
-                    if sn == self.serial_number:
-                        self.dev = d
-                        break
-                    else:
-                        usb.util.dispose_resources(d)  # not the required device, free
-                except Exception as e:
-                    warnings.append(f"Warning at read of SN: {e}")
-                    usb.util.dispose_resources(d)  # free even on error
+                # try:
+                #     # read serial number WITHOUT set_configuration()
+                #     sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)
+                #     if sn == self.serial_number:
+                #         self.dev = d
+                #         break
+                #     else:
+                #         usb.util.dispose_resources(d)  # not the required device, free
+                # except Exception as e:
+                #     warnings.append(f"Warning at read of SN: {e}")
+                #     usb.util.dispose_resources(d)  # free even on error
+                #     continue
+                sn = None
+                for attempt in range(3):
+                    try:
+                        # read serial number WITHOUT set_configuration()
+                        sn = usb.util.get_string(d, d.iSerialNumber, langid=0x0409)
+                        break  # erfolgreich
+                    except Exception as e:
+                        if attempt < 2:
+                            time.sleep(0.3)
+                        else:
+                            warnings.append(f"Warning at read of SN (attempt {attempt+1}): {e}")
+                            usb.util.dispose_resources(d)
+
+                if sn is None:
                     continue
+
+                if sn == self.serial_number:
+                    self.dev = d
+                    break
+                else:
+                    usb.util.dispose_resources(d)                
 
             if self.dev is None:
                 # jetzt erst Warnungen ausgeben - echtes Problem

@@ -49,7 +49,9 @@ def device_thread(serial_number, window_name):
                     print("Frame skipped")
                     pass  # Display is to slow, skip it
 
-        com.send(b'x')
+        #com.send(b'x')
+        stopstr = com.send_receive(b'x')
+        print(stopstr)
 
 # Find all devices
 serials = HS_USBCom.find_all_devices()
