@@ -216,6 +216,7 @@ class TPArray():
             self.ArrayType = ArrayTypes['HTPA120x84dR2']
         elif (self.SensorType == SensorTypes['HTPA160x120DR1_L3K95_0K8']):
             self.ArrayType = ArrayTypes['HTPA160x120dR1']
+            self._detection_r = 81     # radius from center to apply detection procedures to in pixel
         elif (self.SensorType == SensorTypes['HTPA8x8DR1_L0K8_0K8']):
             self.ArrayType = ArrayTypes['HTPA8x8']
         elif (self.SensorType == SensorTypes['HTPA32x32dR2_L1k9_0k8']):
@@ -508,6 +509,11 @@ class TPArray():
             self._mask = self._binary_mask(self._radio_r)
         else:
             self._mask = np.ones(self._npsize)
+        
+        if hasattr(self,'_detection_r'):
+            self._detection_mask = self._binary_mask(self._detection_r)
+        else:
+            self._detection_mask = np.ones(self._npsize)
         
         # From the hard-coded constants, the remaining useful information can
         # be derived
