@@ -157,7 +157,7 @@ class UDP_ClientProcess(WProcess_R1):
 
             # Set success flag and store frame
             result['success'] = True
-            result['frame'] = frame
+            result['pix_dK'] = frame
         except Exception:
             # Set success flag to False in case of failure
             result['success'] = False
