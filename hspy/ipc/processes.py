@@ -60,7 +60,7 @@ import cv2
 import numpy as np
 
 from hspy.LuT import LuT
-from hspytools.tparray import TPArray
+from hspy.tparray import TPArray
 
 from hspy.ipc.processes_base import WProcess_R1, RProcess_R1, RWProcess_R1
 from hspy.ipc.plot_utils import TimeSeriesPlot

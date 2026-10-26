@@ -23,15 +23,15 @@ from datetime import datetime
 import pickle as pkl
 
 
-from hspytools.ipc.threads_base import WThread,RThread, RWThread
-from hspytools.readers import HTPA_UDPReader
-from hspytools.tparray import TPArray
+from hspy.ipc.threads_base import WThread,RThread, RWThread
+from hspy.readers import HTPA_UDPReader
+from hspy.tparray import TPArray
 
 from collections import deque
 
 from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
 from hspy.readers import HTPA_UDPReader
-from hspytools.tparray import TPArray
+from hspy.tparray import TPArray
 
 from hspy.drivers.i2c import I2C_HTPA32x32d
 from hspy.drivers.usb import USB_HTPA

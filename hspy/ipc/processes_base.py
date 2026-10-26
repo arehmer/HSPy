@@ -36,7 +36,6 @@ import pickle
 import queue
 import time
 
-
 # ── Opt-in per-process profiling ────────────────────────────────────────────
 #
 # Off by default (zero overhead, zero behaviour change) -- pass
