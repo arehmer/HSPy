@@ -228,11 +228,13 @@ class UDP_Client(WThread_R1):
     binding, starting the stream -- happens in _setup(), i.e. inside this
     thread, and is undone in _teardown().
 
-    Losing the device (unplugged, network down, or no complete frame for
-    lost_after_s seconds) is reported ONCE; the thread then puts one final
+    Losing the device is reported ONCE; the thread then puts one final
     item {'success': False, 'device_lost': True, ...} into write_buffer,
-    sets the device_lost event and ends. Other errors are printed once per
-    distinct message, not on every attempt.
+    sets the device_lost event and ends. "Lost" means unplugged, network
+    down, no first frame within first_frame_after_s of the stream
+    starting, or no complete frame for lost_after_s after the last good
+    one. Other errors are printed once per distinct message, not on every
+    attempt.
 
     Every item put into write_buffer carries 'success', 'image_id' and
     'DevID'; a successful one additionally carries 'frame'.
@@ -247,6 +249,7 @@ class UDP_Client(WThread_R1):
                  Bcast_Addr: str = '',
                  stream_cmd: bytes = b'K',
                  lost_after_s: float = 5.0,
+                 first_frame_after_s: float = 15.0,
                  **kwargs):
         """
         Parameters
@@ -269,8 +272,14 @@ class UDP_Client(WThread_R1):
             Command that starts the continuous bytestream. b'K' (default)
             streams pixel values in dK.
         lost_after_s : float
-            If no complete frame could be assembled for this long (only
-            errors / socket timeouts), the device is considered lost.
+            If no complete frame could be assembled for this long after
+            the last good one (only errors / socket timeouts), the device
+            is considered lost.
+        first_frame_after_s : float
+            Budget for the FIRST frame, measured from the moment the
+            stream command was sent. A device can need a while to start
+            sending, which is not the same failure as a device that was
+            streaming and stopped, so it gets its own, larger budget.
 
         Returns
         -------
@@ -295,6 +304,7 @@ class UDP_Client(WThread_R1):
         self.Bcast_Addr = Bcast_Addr
         self.stream_cmd = stream_cmd
         self.lost_after_s = lost_after_s
+        self.first_frame_after_s = first_frame_after_s
 
         # Set when the device is lost; check with udp_thread.device_lost.is_set()
         self.device_lost = threading.Event()
@@ -317,11 +327,25 @@ class UDP_Client(WThread_R1):
         self._n_errors = 0
 
         self.t0 = time.time()
-        self._t_last_frame = time.monotonic()
+
+        # Watchdog reference, deliberately NOT stamped here: discovery and
+        # binding still lie ahead, and broadcast() alone always waits out
+        # its full 5 s RESPONSE_TIMEOUT. A clock started at this point is
+        # already past lost_after_s by the time the first read happens, so
+        # the very first socket timeout would be reported as a lost
+        # device. Both are stamped once the stream is really running, and
+        # _t_last_frame stays None until a frame has actually arrived.
+        self._t_stream_start = None
+        self._t_last_frame = None
 
         try:
             if (self.DevID != -1) and (len(self.Bcast_Addr) != 0):
-                self.udp_reader.broadcast(self.Bcast_Addr)
+                # Only discover if this reader does not know the device
+                # yet. broadcast() always waits out its full 5 s
+                # RESPONSE_TIMEOUT, and the caller has usually just run it
+                # to pick this DevID in the first place.
+                if self.DevID not in self.udp_reader.devices.index:
+                    self.udp_reader.broadcast(self.Bcast_Addr)
                 self.udp_reader.bind_tparray(DevID=self.DevID)
             else:
                 self.udp_reader.bind_tparray(IP=self.IP)
@@ -335,6 +359,10 @@ class UDP_Client(WThread_R1):
             # Start continuous bytestream
             self.udp_reader.start_continuous_bytestream(self.DevID,
                                                         cmd=self.stream_cmd)
+
+            # From here on the device should be sending. This is what the
+            # watchdog measures against until the first frame arrives.
+            self._t_stream_start = time.monotonic()
         except Exception as e:
             # Device not reachable: report once and end the thread (the
             # loop in run() does not start because _device_lost sets _exit)
@@ -355,7 +383,20 @@ class UDP_Client(WThread_R1):
             # Nothing but errors for too long: the device is gone (unplugged,
             # network down, powered off). Report once, hand a final
             # 'device_lost' item to the consumer, end the loop.
-            if time.monotonic() - self._t_last_frame > self.lost_after_s:
+            if self._t_last_frame is None:
+                # No frame has arrived yet, so there is nothing to be
+                # silent *since* -- the stream may simply not have started
+                # yet. Measured from the stream command instead, against
+                # its own budget.
+                if (self._t_stream_start is not None
+                        and time.monotonic() - self._t_stream_start
+                        > self.first_frame_after_s):
+                    self._device_lost(
+                        f"no frame within {self.first_frame_after_s:g} s of "
+                        f"starting the stream (last error: {e})")
+                    return self._lost_item()
+
+            elif time.monotonic() - self._t_last_frame > self.lost_after_s:
                 self._device_lost(f"no frame for {self.lost_after_s:g} s "
                                   f"(last error: {e})")
                 return self._lost_item()
