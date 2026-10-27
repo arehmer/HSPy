@@ -11,7 +11,6 @@ Usage:
 """
 
 import multiprocessing as mp
-import threading
 import time
 
 from hspy.ipc.processes_base import SharedMemoryQueue
@@ -114,18 +113,12 @@ if __name__ == '__main__':
                 print(f"WARNING: {usb_process.name} did not finish within 10 s - "
                       f"the device may still be streaming.")
 
-        # Then the consumers. No more frames arrive, so an Imshow process
-        # may be blocked in read_buffer.get(): put one dummy item into each
-        # buffer to wake it up (ImshowProcess skips success=False).
-        # The put happens in a background thread: if an Imshow process has
-        # already exited and left its buffer full, the put blocks - which
-        # must not block the shutdown.
+        # Then the consumers. Each polls its buffer with a timeout, so
+        # stop() is all they need -- no dummy item to wake them up with,
+        # and so no background thread to keep that put from blocking on a
+        # buffer whose consumer has already gone.
         for plot_process in plot_processes:
             plot_process.stop()
-        for usb_buffer in buffers:
-            threading.Thread(target=usb_buffer.put,
-                             args=({'success': False},),
-                             daemon=True).start()
         for plot_process in plot_processes:
             plot_process.join(timeout=5)
             if plot_process.is_alive():

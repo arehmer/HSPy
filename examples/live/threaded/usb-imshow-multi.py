@@ -10,7 +10,7 @@ Usage:
     python usb-imshow-multi.py
 """
 
-from queue import Queue, Full
+from queue import Queue
 import time
 
 from hspy.ipc.threads import Imshow, ImshowDisplay, USB_Client
@@ -98,16 +98,10 @@ if __name__ == '__main__':
         for usb_thread in usb_threads:
             usb_thread.join()
 
-        # Then the consumers. No more frames arrive, so an Imshow thread
-        # may be blocked in read_buffer.get(): put one dummy item into
-        # each buffer to wake it up (Imshow skips success=False)
+        # Then the consumers. Each polls its buffer with a timeout, so
+        # stop() is all they need -- no dummy item to wake them up with.
         for plot_thread in plot_threads:
             plot_thread.stop()
-        for usb_buffer in buffers:
-            try:
-                usb_buffer.put({'success': False}, timeout=1.0)
-            except Full:
-                pass              # buffer still holds a frame - that wakes it up as well
         for plot_thread in plot_threads:
             plot_thread.join()
 

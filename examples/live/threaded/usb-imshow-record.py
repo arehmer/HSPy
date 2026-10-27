@@ -18,7 +18,7 @@ Usage:
     python usb-imshow-record.py [--dir recordings]
 """
 
-from queue import Queue, Full
+from queue import Queue
 import argparse
 import time
 
@@ -132,15 +132,10 @@ if __name__ == '__main__':
             usb_thread.join()
 
         # Then the display threads. stop() also stops a running recording
-        # and starts writing it (save_on_stop=True). Wake threads blocked in
-        # read_buffer.get() with a dummy item.
+        # and starts writing it (save_on_stop=True). Each polls its buffer
+        # with a timeout, so stop() is all they need.
         for plot_thread in plot_threads:
             plot_thread.stop()
-        for usb_buffer in buffers:
-            try:
-                usb_buffer.put({'success': False}, timeout=1.0)
-            except Full:
-                pass
         for plot_thread in plot_threads:
             plot_thread.join()
 

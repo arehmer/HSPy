@@ -40,59 +40,14 @@ import time
 #
 # Off by default (zero overhead, zero behaviour change) -- pass
 # profile=True to any *Process_R1 constructor to turn it on for that
-# process. Every `profile_every` iterations it prints a rolling-average
-# report of where time in the run() loop actually went, then resets the
-# counters for the next window. This exists to answer exactly the
-# question "how much of my per-iteration time is compute vs. blocked on
-# the queue?" without hand-instrumenting every subclass.
+# process. The counters themselves live in hspy.ipc.misc, because
+# threads_base.py needs exactly the same ones and two hand-synced copies
+# would drift apart. Re-exported here under their old names so existing
+# imports from this module keep working.
 
-class _ProfileStat:
-    """Accumulates count / total / max for one timed quantity."""
-
-    __slots__ = ('count', 'total', 'max')
-
-    def __init__(self):
-        self.count = 0
-        self.total = 0.0
-        self.max = 0.0
-
-    def add(self, dt: float):
-        self.count += 1
-        self.total += dt
-        if dt > self.max:
-            self.max = dt
-
-    def mean(self) -> float:
-        return self.total / self.count if self.count else 0.0
-
-    def reset(self):
-        self.count = 0
-        self.total = 0.0
-        self.max = 0.0
-
-
-def _print_profile_report(name: str, stats: dict):
-    """
-    Prints a one-line rolling report (e.g.
-    "[processor_process] target=45.2ms (max 120.3ms, n=50), put=12.1ms
-    (max 30.0ms, n=50), cycle=57.3ms (max 140.1ms, n=50), rate=17.5Hz")
-    and resets every stat in `stats` for the next window.
-    """
-    parts = []
-    for key, stat in stats.items():
-        if stat.count == 0:
-            continue
-        parts.append(f"{key}={stat.mean()*1000:.1f}ms "
-                     f"(max {stat.max*1000:.1f}ms, n={stat.count})")
-
-    cycle = stats.get('cycle')
-    if cycle is not None and cycle.count and cycle.mean() > 0:
-        parts.append(f"rate={1.0/cycle.mean():.2f}Hz")
-
-    print(f"[{name}] " + ", ".join(parts), flush=True)
-
-    for stat in stats.values():
-        stat.reset()
+from hspy.ipc.misc import (_ProfileStat, _print_profile_report,
+                           _new_write_profile, _new_read_profile,
+                           drop_oldest_put, _GET_TIMEOUT_S)
 
 
 # ── Shared-memory-backed, queue.Queue-compatible IPC primitive ──────────────
@@ -314,10 +269,18 @@ class WProcess_R1(Process):
 
     def run(self):
 
-        self._setup()
+        # A _setup() that raises must not skip _teardown(): whatever it
+        # managed to open before it failed (a USB handle, a bound socket)
+        # still has to be released, and the child must not die with a
+        # bare traceback while the parent keeps waiting for frames.
+        try:
+            self._setup()
+        except Exception as e:
+            print(f"[{self.name}] Setup failed: {e}")
+            self._exit.set()
 
         if self.profile:
-            prof = {'target': _ProfileStat(), 'put': _ProfileStat(), 'cycle': _ProfileStat()}
+            prof = _new_write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -331,7 +294,7 @@ class WProcess_R1(Process):
                     result = self._target()
                     t1 = time.perf_counter()
 
-                    self.write_buffer.put(result)
+                    self._put(result)
                     t2 = time.perf_counter()
 
                     prof['target'].add(t1 - t0)
@@ -347,9 +310,10 @@ class WProcess_R1(Process):
                     # Produce data
                     result = self._target()
 
-                    # Put result into downstream buffer (blocks naturally
-                    # if the buffer is full, exactly like WThread_R1)
-                    self.write_buffer.put(result)
+                    # Put result into downstream buffer (never blocks:
+                    # drops the oldest item if the consumer cannot keep
+                    # up, exactly like WThread_R1)
+                    self._put(result)
 
             except queue.Empty:
                 continue
@@ -358,6 +322,19 @@ class WProcess_R1(Process):
                 print(f"[{self.name}] {e}")
 
         self._teardown()
+
+    def _put(self, result) -> bool:
+        """
+        Hand one result to write_buffer using the drop-oldest policy.
+
+        This used to be a blocking write_buffer.put(). That deadlocked
+        the whole stage whenever its consumer stopped first: the producer
+        waited forever for a free slot, never got back to the top of the
+        loop, never saw _exit, and never reached _teardown() -- so the
+        device was left streaming and join() hung. See
+        misc.drop_oldest_put().
+        """
+        return drop_oldest_put(self.write_buffer, result, self.name)
 
     def _teardown(self):
         """Override in subclass for optional cleanup inside the child
@@ -375,13 +352,16 @@ class WProcess_R1(Process):
 class RProcess_R1(Process):
     """
     Base class for a process that reads from a buffer (a sink stage with
-    no downstream buffer). Mirrors RThread_R1. Subclasses are expected to
-    call self.read_buffer.get() themselves inside _target().
+    no downstream buffer). Mirrors RThread_R1.
+
+    Subclasses read their input inside _target() and must do so through
+    self._get(), never through self.read_buffer.get() -- see _get().
     """
 
     def __init__(self,
                  name: str,
                  read_buffer,
+                 get_timeout: float = _GET_TIMEOUT_S,
                  profile: bool = False,
                  profile_every: int = 50,
                  **kwargs):
@@ -389,6 +369,10 @@ class RProcess_R1(Process):
         super().__init__(name=name, target=self._target, **kwargs)
 
         self.read_buffer = read_buffer
+
+        # Upper bound on how long one _get() waits for an item, i.e. on
+        # how long stop() takes to be noticed while no data arrives.
+        self.get_timeout = get_timeout
 
         # See WProcess_R1 for what this does. No 'put' stat here since
         # this class has no write_buffer -- 'target' already includes
@@ -407,7 +391,7 @@ class RProcess_R1(Process):
         self._setup()
 
         if self.profile:
-            prof = {'target': _ProfileStat(), 'cycle': _ProfileStat()}
+            prof = _new_read_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -433,6 +417,11 @@ class RProcess_R1(Process):
                     self._target()
 
             except queue.Empty:
+                # Nothing arrived within get_timeout. Let the subclass do
+                # its idle work, then re-check the exit flag at the top of
+                # the loop instead of waiting here for an item that may
+                # never come.
+                self._on_idle()
                 continue
 
             except Exception as e:
@@ -440,11 +429,33 @@ class RProcess_R1(Process):
 
         self._teardown()
 
+    def _get(self, timeout: float = None):
+        """
+        Read one item from read_buffer, waiting at most `timeout` seconds
+        (self.get_timeout by default) instead of forever.
+
+        Subclasses must use this in _target() rather than calling
+        self.read_buffer.get() directly: a bare get() blocks until an item
+        arrives, which never happens once the stage upstream has ended, so
+        the loop above would never see stop(), _teardown() would never run
+        and join() would hang. The queue.Empty raised on timeout is caught
+        there and turned into another pass around the loop.
+        """
+        return self.read_buffer.get(timeout=self.get_timeout
+                                    if timeout is None else timeout)
+
+    def _on_idle(self):
+        """Override in subclass. Called whenever a _get() timed out, i.e.
+        while no data arrives -- for keeping a GUI responsive, handling
+        commands, ..."""
+        pass
+
     def _teardown(self):
         pass
 
     def _target(self):
-        """Override in subclass. Should read from self.read_buffer."""
+        """Override in subclass. Should read from self.read_buffer via
+        self._get()."""
         raise NotImplementedError
 
     def stop(self):
@@ -454,15 +465,18 @@ class RProcess_R1(Process):
 class RWProcess_R1(Process):
     """
     Base class for a process that reads from one buffer and writes into
-    another. Mirrors RWThread_R1. Subclasses are expected to call
-    self.read_buffer.get() themselves inside _target(); run() takes care
-    of writing whatever _target() returns into write_buffer.
+    another. Mirrors RWThread_R1. run() takes care of writing whatever
+    _target() returns into write_buffer.
+
+    Subclasses read their input inside _target() and must do so through
+    self._get(), never through self.read_buffer.get() -- see _get().
     """
 
     def __init__(self,
                  name: str,
                  read_buffer,
                  write_buffer,
+                 get_timeout: float = _GET_TIMEOUT_S,
                  profile: bool = False,
                  profile_every: int = 50,
                  **kwargs):
@@ -471,6 +485,10 @@ class RWProcess_R1(Process):
 
         self.read_buffer = read_buffer
         self.write_buffer = write_buffer
+
+        # Upper bound on how long one _get() waits for an item, i.e. on
+        # how long stop() takes to be noticed while no data arrives.
+        self.get_timeout = get_timeout
 
         # See WProcess_R1 for what this does. Note 'target' here times
         # self.read_buffer.get() (blocking on upstream) AND compute
@@ -491,7 +509,7 @@ class RWProcess_R1(Process):
         self._setup()
 
         if self.profile:
-            prof = {'target': _ProfileStat(), 'put': _ProfileStat(), 'cycle': _ProfileStat()}
+            prof = _new_write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -518,13 +536,19 @@ class RWProcess_R1(Process):
                         _print_profile_report(self.name, prof)
 
                 else:
-                    # Retrieve + process data (subclass reads read_buffer itself)
+                    # Retrieve + process data (the subclass reads
+                    # read_buffer itself, through self._get())
                     result = self._target()
 
                     # Put result into downstream buffer
                     self.write_buffer.put(result)
 
             except queue.Empty:
+                # Nothing arrived within get_timeout. Let the subclass do
+                # its idle work, then re-check the exit flag at the top of
+                # the loop instead of waiting here for an item that may
+                # never come.
+                self._on_idle()
                 continue
 
             except Exception as e:
@@ -532,11 +556,34 @@ class RWProcess_R1(Process):
 
         self._teardown()
 
+    def _get(self, timeout: float = None):
+        """
+        Read one item from read_buffer, waiting at most `timeout` seconds
+        (self.get_timeout by default) instead of forever.
+
+        Subclasses must use this in _target() rather than calling
+        self.read_buffer.get() directly: a bare get() blocks until an item
+        arrives, which never happens once the stage upstream has ended, so
+        the loop above would never see stop(), _teardown() would never run
+        and join() would hang. The queue.Empty raised on timeout is caught
+        there and turned into another pass around the loop -- the
+        downstream put() is skipped, since there is nothing to write.
+        """
+        return self.read_buffer.get(timeout=self.get_timeout
+                                    if timeout is None else timeout)
+
+    def _on_idle(self):
+        """Override in subclass. Called whenever a _get() timed out, i.e.
+        while no data arrives -- for keeping a GUI responsive, handling
+        commands, ..."""
+        pass
+
     def _teardown(self):
         pass
 
     def _target(self):
-        """Override in subclass."""
+        """Override in subclass. Should read from self.read_buffer via
+        self._get()."""
         raise NotImplementedError
 
     def stop(self):

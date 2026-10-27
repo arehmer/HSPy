@@ -24,6 +24,17 @@ import platform
 from .tparray import TPArray
 
 
+class HTPA_UDPTimeout(TimeoutError):
+    """
+    A bound device sent nothing within the socket's timeout.
+
+    Raised by HTPA_UDPReader.read_continuous_bytestream() so that a caller
+    can tell "the device is not answering" apart from "the device sent a
+    frame". Subclasses TimeoutError, so code that only catches OSError /
+    socket.timeout keeps working.
+    """
+
+
 class HTPAdGUI_FileReader():
     
     def __init__(self,tparray = None):
@@ -990,23 +1001,35 @@ class HTPA_UDPReader():
             
         return answ    
             
-    def start_continuous_bytestream(self,dev_id):
-        
+    def start_continuous_bytestream(self,dev_id,cmd=b'K'):
+        """
+        Parameters
+        ----------
+        dev_id : int
+            DevID of a bound device.
+        cmd : bytes
+            Command that starts the stream. b'K' (default) streams pixel
+            values in dK. Configurable so that UDP_Client /
+            UDP_ClientProcess can expose the same stream_cmd argument as
+            their USB counterparts.
+        """
+
         # Get device information from the device list
         dev_info = self.devices.loc[[dev_id]]
-        
+
         # If more than one devices have the same device id, return error
         if len(dev_info) != 1:
             Exception('Multiple devices have the same device id.')
-        
+
         # Get udp socket
         udp_socket = self.sockets[dev_id]
-                
+
         # Create server address
         server_address = (dev_info['IP'].item(), self.port)
 
         # Send message to device to start streaming bytes
-        _ = udp_socket.sendto(bytes('K','utf-8'),server_address)
+        cmd = cmd.encode('utf-8') if isinstance(cmd,str) else bytes(cmd)
+        _ = udp_socket.sendto(cmd,server_address)
 
     def stop_continuous_bytestream(self,**kwargs):
         
@@ -1058,7 +1081,20 @@ class HTPA_UDPReader():
         return answ
     
     def read_continuous_bytestream(self,dev_id):
-        
+        """
+        Assemble one frame from the continuous bytestream of a bound
+        device.
+
+        Raises
+        ------
+        HTPA_UDPTimeout
+            If the device sent nothing within the socket's timeout. This
+            used to return a frame of zeros instead, which made an
+            unplugged device indistinguishable from a working one sending
+            black frames -- UDP_Client / UDP_ClientProcess rely on the
+            exception to notice that the device is gone.
+        """
+
         # Get device information from the device list
         dev_info = self.devices.loc[[dev_id]]
         
@@ -1091,9 +1127,10 @@ class HTPA_UDPReader():
                 try:
                     package = udp_socket.recv(self.tparray._package_size)
                 except socket.timeout:
-                    warnings.warn('Socket timeout!')
-                    return np.zeros((len(self.tparray._serial_data_order),))
-                    
+                    raise HTPA_UDPTimeout(f'Socket timeout while waiting '
+                                          f'for the first package of a '
+                                          f'frame from device {dev_id}.')
+
                 
                 # Check package index
                 # Exception for (32,32)
@@ -1113,12 +1150,15 @@ class HTPA_UDPReader():
                     sync = True
             
             for p in range(2,self.tparray._package_num+1):
-                
+
                 # Receive package
                 try:
                     package = udp_socket.recv(self.tparray._package_size)
                 except socket.timeout:
-                    return np.zeros((len(self.tparray._serial_data_order),))
+                    raise HTPA_UDPTimeout(f'Socket timeout after package '
+                                          f'{p-1} of '
+                                          f'{self.tparray._package_num} '
+                                          f'from device {dev_id}.')
 
                 # Get index of package
                 # Exception for (32,32)

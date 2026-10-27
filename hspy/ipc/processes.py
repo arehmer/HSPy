@@ -3,7 +3,8 @@
 Multiprocessing counterpart to threads.py / ProcessorThread.py.
 
 Contains multiprocessing versions of:
-  - UDP_Client             (threads.py)          -> UDP_ClientProcess
+  - USB_Client              (threads.py)          -> USB_ClientProcess
+  - UDP_Client              (threads.py)          -> UDP_ClientProcess
   - I2C_Client              (threads.py)          -> I2C_ClientProcess
   - UDP_PickleServer        (threads.py)          -> UDP_PickleServerProcess
   - UDP_PickleClient        (threads.py)          -> UDP_PickleClientProcess
@@ -87,15 +88,21 @@ class USB_ClientProcess(WProcess_R1):
     {'success': False, 'device_lost': True, ...} into write_buffer, sets
     the device_lost event (readable from the parent) and ends. Other
     errors are printed once per distinct message, not on every attempt.
+
+    Every item put into write_buffer carries 'success', 'image_id' and
+    'DevID'; a successful one additionally carries 'frame' (the pixel
+    values) plus everything USB_HTPA.acquire_frame() returned ('pix',
+    'aux', 'ptat_avg', 't', 'serial_number', ...).
     """
 
     def __init__(self,
                  usb_driver_cls,
                  usb_driver_kwargs: dict,
                  write_buffer,
-                 stream_cmd: bytes = b'K',
+                 stream_cmd: bytes = b't',
                  name: str = 'usb_process',
                  lost_after_s: float = 5.0,
+                 DevID: int = -1,
                  **kwargs):
         """
         Parameters
@@ -111,8 +118,9 @@ class USB_ClientProcess(WProcess_R1):
         write_buffer : Queue / SharedMemoryQueue
             Buffer that acquired frames are put into.
         stream_cmd : bytes
-            Command that starts the stream. b'K' (default) streams pixel
-            values in dK, which end up in result['pix_dK'].
+            Command that starts the stream. b't' (default) streams pixel
+            values the device has already converted; b'K' streams them in
+            dK, which additionally end up in result['pix_dK'].
         name : str
             Process name. Give each process a distinct name when running
             several devices.
@@ -120,6 +128,11 @@ class USB_ClientProcess(WProcess_R1):
             If no frame could be read for this long (only errors), the
             device is considered lost even if the driver did not report a
             disconnect (e.g. some Windows USB errors after unplugging).
+        DevID : int
+            Optional device number, copied into every result as
+            result['DevID'] so a consumer fed by several clients can tell
+            them apart. -1 (default) means "not set"; USB devices are
+            identified by result['serial_number'] anyway.
 
         Returns
         -------
@@ -131,6 +144,7 @@ class USB_ClientProcess(WProcess_R1):
         self.usb_driver_kwargs = usb_driver_kwargs
         self.stream_cmd = stream_cmd
         self.lost_after_s = lost_after_s
+        self.DevID = DevID
 
         # Set by the child when the device is lost; check it in the parent
         # with usb_process.device_lost.is_set()
@@ -157,6 +171,10 @@ class USB_ClientProcess(WProcess_R1):
         self._last_error = None
         self._n_errors = 0
 
+        # Set time
+        self.t0 = time.time()
+        self._t_last_frame = time.monotonic()
+
         # Opens the USB device here, inside the child process.
         # USB_HTPA.__init__ already calls open() + init() itself (init()
         # first stops a stream a previous run may have left running).
@@ -169,14 +187,13 @@ class USB_ClientProcess(WProcess_R1):
             print(f"[{self.name}] Stream started: {resp!r}")
         except Exception as e:
             # Device gone / not usable: report once and end the process
-            # (the loop in run() does not start because _exit is set)
+            # (the loop in run() does not start because _exit is set).
+            # _put() instead of write_buffer.put(): nothing may block here
+            # either, or a pipeline whose consumer has not started yet
+            # would hang in _setup() and never reach _teardown().
             self._device_lost(f"could not start the device: {e}")
-            self.write_buffer.put(self._lost_item())
+            self._put(self._lost_item())
             return
-
-        # Set time
-        self.t0 = time.time()
-        self._t_last_frame = time.monotonic()
 
     def _target(self):
 
@@ -221,8 +238,12 @@ class USB_ClientProcess(WProcess_R1):
             result = {'success': True}
             result.update(data)
 
-        # Store image_id
+            # Canonical key every client writes, whatever the transport is
+            result['frame'] = data['pix']
+
+        # Store image_id and device number
         result['image_id'] = self.image_id
+        result['DevID'] = self.DevID
 
         # Increment image_id
         self.image_id = self.image_id + 1
@@ -242,13 +263,15 @@ class USB_ClientProcess(WProcess_R1):
         return {'success': False,
                 'device_lost': True,
                 'serial_number': self.usb_driver_kwargs.get('serial_number'),
-                'image_id': self.image_id}
+                'image_id': self.image_id,
+                'DevID': self.DevID}
 
     def _teardown(self):
         # Runs inside the child process once the loop has exited: stop the
-        # stream and release the device. The loop only exits if the process
-        # is not blocked in write_buffer.put() - so stop this producer
-        # BEFORE its consumer (see usb-imshow-mp.py).
+        # stream and release the device. Reaching this no longer depends on
+        # the consumer still draining write_buffer -- WProcess_R1._put()
+        # discards the oldest item instead of blocking -- so the shutdown
+        # order of a pipeline is no longer load-bearing.
         self._release_device()
 
     def _release_device(self):
@@ -330,7 +353,7 @@ class UDP_PickleServerProcess(RProcess_R1):
 
         # Get data (e.g. a dict with a numpy array / pandas DataFrame)
         # from the upstream buffer
-        data = self.read_buffer.get()
+        data = self._get()
 
         # Serialize it
         payload = pkl.dumps(data)
@@ -366,57 +389,27 @@ class UDP_PickleServerProcess(RProcess_R1):
     def stop(self):
         self._exit.set()
 
- 
-    def _device_lost(self, reason: str):
-        """Report the loss once, flag it for the parent, end the loop."""
-        serial = self.usb_driver_kwargs.get('serial_number', '?')
-        print(f"[{self.name}] Connection to device {serial} LOST: {reason}. "
-              f"Continuing without it.")
-        self.device_lost.set()
-        self._exit.set()
- 
-    def _lost_item(self) -> dict:
-        """Final item for the consumer: tells it that no more frames come."""
-        return {'success': False,
-                'device_lost': True,
-                'serial_number': self.usb_driver_kwargs.get('serial_number'),
-                'image_id': self.image_id}
- 
-    def _teardown(self):
-        # Runs inside the child process once the loop has exited: stop the
-        # stream and release the device. The loop only exits if the process
-        # is not blocked in write_buffer.put() - so stop this producer
-        # BEFORE its consumer (see usb-imshow-mp.py).
-        self._release_device()
- 
-    def _release_device(self):
-        usb_driver = getattr(self, 'usb_driver', None)
-        if usb_driver is None:
-            return
-        self.usb_driver = None            # release only once
-        if usb_driver.is_streaming and usb_driver.is_connected:
-            try:
-                resp, leftovers = usb_driver.stop_stream()
-                print(f"[{self.name}] Stream stopped: {resp!r} "
-                      f"({len(leftovers)} leftover frames discarded)")
-            except Exception as e:
-                print(f"[{self.name}] Stopping stream failed: {e}")
-        try:
-            usb_driver.close()
-            print(f"[{self.name}] Device released.")
-        except Exception as e:
-            print(f"[{self.name}] Releasing device failed: {e}")
- 
-    def stop(self):
-        # Only signals the child (this runs in the parent). The child's loop
-        # exits after the current frame and _teardown() stops the stream.
-        # Never terminate() this process, or the device keeps streaming.
-        self._exit.set()
 
 class UDP_ClientProcess(WProcess_R1):
     """
     Multiprocessing version of UDP_Client. Runs an HTPA_UDPReader in its
-    own process and writes assembled frames into write_buffer.
+    own process, binds one HTPA device, starts its continuous bytestream
+    and writes assembled frames into write_buffer.
+
+    Same shape as USB_ClientProcess: the reader is built from a class +
+    kwargs inside the child process (see the design note at the top of
+    this module), the device is bound and the stream started in _setup(),
+    and both are undone in _teardown().
+
+    Losing the device (unplugged, network down, or no complete frame for
+    lost_after_s seconds) is reported ONCE; the process then puts one
+    final item {'success': False, 'device_lost': True, ...} into
+    write_buffer, sets the device_lost event (readable from the parent)
+    and ends. Other errors are printed once per distinct message, not on
+    every attempt.
+
+    Every item put into write_buffer carries 'success', 'image_id' and
+    'DevID'; a successful one additionally carries 'frame'.
     """
 
     def __init__(self,
@@ -426,6 +419,9 @@ class UDP_ClientProcess(WProcess_R1):
                  IP: str = '',
                  DevID: int = -1,
                  Bcast_Addr: str = '',
+                 stream_cmd: bytes = b'K',
+                 name: str = 'udp_process',
+                 lost_after_s: float = 5.0,
                  **kwargs):
         """
         Parameters
@@ -435,11 +431,20 @@ class UDP_ClientProcess(WProcess_R1):
             inside the child process.
         udp_reader_kwargs : dict
             Keyword arguments to construct udp_reader_cls with, e.g.
-            {'listen_port': 30444}.
+            {'ArrayType': 1}.
         write_buffer : Queue / SharedMemoryQueue
             Buffer that assembled frames are put into.
         IP, DevID, Bcast_Addr : see UDP_Client (threads.py) -- same
             binding semantics, just deferred to _setup().
+        stream_cmd : bytes
+            Command that starts the continuous bytestream. b'K' (default)
+            streams pixel values in dK.
+        name : str
+            Process name. Give each process a distinct name when running
+            several devices.
+        lost_after_s : float
+            If no complete frame could be assembled for this long (only
+            errors / socket timeouts), the device is considered lost.
 
         Returns
         -------
@@ -447,70 +452,128 @@ class UDP_ClientProcess(WProcess_R1):
 
         """
 
+        # Checked here, in the parent, so a missing argument fails at
+        # construction instead of inside the child a moment later
+        if not ((DevID != -1 and len(Bcast_Addr) != 0) or len(IP) != 0):
+            raise ValueError('Either IP or DevID and Bcast_Addr of the '
+                             'device to be bound have to be specified!')
+
         self.udp_reader_cls = udp_reader_cls
         self.udp_reader_kwargs = udp_reader_kwargs
 
         self.IP = IP
         self.DevID = DevID
         self.Bcast_Addr = Bcast_Addr
+        self.stream_cmd = stream_cmd
+        self.lost_after_s = lost_after_s
 
-        super().__init__(name='udp_process',
+        # Set by the child when the device is lost; check it in the parent
+        # with udp_process.device_lost.is_set()
+        self.device_lost = MPEvent()
+
+        super().__init__(name=name,
                          write_buffer=write_buffer,
                          **kwargs)
 
     def _setup(self):
 
-        # Construct the reader (and therefore open its socket) here,
-        # inside the child process.
-        self.udp_reader = self.udp_reader_cls(**self.udp_reader_kwargs)
-
-        # Depending on whether the device's IP or the Device ID along
-        # with the broadcast address are provided, the process of
-        # finding and binding the corresponding htpa device differs
-        if (self.DevID != -1) and (len(self.Bcast_Addr) != 0):
-            self.udp_reader.broadcast(self.Bcast_Addr)
-            self.udp_reader.bind_tparray(DevID=self.DevID)
-
-        elif len(self.IP) != 0:
-            self.udp_reader.bind_tparray(IP=self.IP)
-
-            # Save DevID of bound device to attribute
-            devices = self.udp_reader.devices
-            self.DevID = devices[devices['IP'] == self.IP].index.item()
-
-        else:
-            print('Either IP or DevID and Bcast_Addr of the device to be ' +
-                  'bound have to be specified!')
-
-        # Start continuous bytestream
-        self.udp_reader.start_continuous_bytestream(self.DevID)
+        # Ignore Ctrl+C in this process. On Windows Ctrl+C is delivered to
+        # every process attached to the console, not only the parent. A
+        # KeyboardInterrupt here would abort the loop in the middle of a
+        # read, skip _teardown() and leave the device streaming into a
+        # socket nobody reads any more. Instead the parent catches Ctrl+C
+        # and calls stop(); the loop then exits after the current frame and
+        # _teardown() stops the stream properly.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
 
         # Set image_id counter
         self.image_id = 0
 
-        # Set time
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
         self.t0 = time.time()
+        self._t_last_frame = time.monotonic()
+
+        # Set once the device is actually bound, so _teardown() only
+        # releases what this process really acquired
+        self._bound = False
+        self.udp_reader = None
+
+        try:
+            # Construct the reader (and therefore open its socket) here,
+            # inside the child process.
+            self.udp_reader = self.udp_reader_cls(**self.udp_reader_kwargs)
+
+            # Depending on whether the device's IP or the Device ID along
+            # with the broadcast address are provided, the process of
+            # finding and binding the corresponding htpa device differs
+            if (self.DevID != -1) and (len(self.Bcast_Addr) != 0):
+                self.udp_reader.broadcast(self.Bcast_Addr)
+                self.udp_reader.bind_tparray(DevID=self.DevID)
+            else:
+                self.udp_reader.bind_tparray(IP=self.IP)
+
+                # Save DevID of bound device to attribute
+                devices = self.udp_reader.devices
+                self.DevID = devices[devices['IP'] == self.IP].index.item()
+
+            self._bound = True
+
+            # Start continuous bytestream
+            self.udp_reader.start_continuous_bytestream(self.DevID,
+                                                        cmd=self.stream_cmd)
+        except Exception as e:
+            # Device gone / not reachable: report once and end the process
+            # (the loop in run() does not start because _exit is set)
+            self._device_lost(f"could not start the stream: {e}")
+            self._put(self._lost_item())
+            return
+
+        print(f"[{self.name}] Stream started for device {self.DevID}.")
 
     def _target(self):
-
-        # Dictionary for storing results in
-        result = {}
 
         try:
             # Try to assemble a frame from the udp packages
             frame = self.udp_reader.read_continuous_bytestream(self.DevID)
 
+        except Exception as e:
+
+            # Nothing but errors for too long: the device is gone (unplugged,
+            # network down, powered off). Report once, hand a final
+            # 'device_lost' item to the consumer, end the loop.
+            if time.monotonic() - self._t_last_frame > self.lost_after_s:
+                self._device_lost(f"no frame for {self.lost_after_s:g} s "
+                                  f"(last error: {e})")
+                return self._lost_item()
+
+            # Other errors (a single socket timeout, lost packets, ...):
+            # print each distinct message once, and don't spin
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+            time.sleep(0.05)
+
+            result = {'success': False}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Receiving frames again "
+                      f"({self._n_errors} failed attempt(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+            self._t_last_frame = time.monotonic()
+
             # Set success flag and store frame
-            result['success'] = True
-            result['pix_dK'] = frame
-        except Exception:
-            # Set success flag to False in case of failure
-            result['success'] = False
+            result = {'success': True}
+            result['frame'] = frame
 
-        # Store image_id
+        # Store image_id and device ID
         result['image_id'] = self.image_id
-
-        # Store device ID
         result['DevID'] = self.DevID
 
         # Increment image_id
@@ -518,7 +581,52 @@ class UDP_ClientProcess(WProcess_R1):
 
         return result
 
+    def _device_lost(self, reason: str):
+        """Report the loss once, flag it for the parent, end the loop."""
+        print(f"[{self.name}] Connection to device {self.DevID} LOST: "
+              f"{reason}. Continuing without it.")
+        self.device_lost.set()
+        self._exit.set()
+
+    def _lost_item(self) -> dict:
+        """Final item for the consumer: tells it that no more frames come."""
+        return {'success': False,
+                'device_lost': True,
+                'image_id': self.image_id,
+                'DevID': self.DevID}
+
+    def _teardown(self):
+        # Runs inside the child process once the loop has exited: stop the
+        # stream and release the device, so it is not left streaming into a
+        # socket nobody reads any more.
+        self._release_device()
+
+    def _release_device(self):
+        udp_reader = getattr(self, 'udp_reader', None)
+        if udp_reader is None:
+            return
+        self.udp_reader = None            # release only once
+
+        if not getattr(self, '_bound', False):
+            return
+        self._bound = False
+
+        try:
+            udp_reader.stop_continuous_bytestream(DevID=self.DevID)
+            print(f"[{self.name}] Stream stopped.")
+        except Exception as e:
+            print(f"[{self.name}] Stopping stream failed: {e}")
+
+        try:
+            # Sends the release command and closes the device's socket
+            udp_reader.release_tparray(self.DevID)
+        except Exception as e:
+            print(f"[{self.name}] Releasing device failed: {e}")
+
     def stop(self):
+        # Only signals the child (this runs in the parent). The child's loop
+        # exits after the current frame and _teardown() stops the stream.
+        # Never terminate() this process, or the device keeps streaming.
         self._exit.set()
 
 
@@ -689,7 +797,7 @@ class UDP_PickleServerProcess(RProcess_R1):
 
         # Get data (e.g. a dict with a numpy array / pandas DataFrame)
         # from the upstream buffer
-        data = self.read_buffer.get()
+        data = self._get()
 
         # Serialize it
         payload = pkl.dumps(data)
@@ -928,12 +1036,25 @@ class ImshowProcess(RProcess_R1):
     def _target(self):
 
         # Get result from upstream process
-        data = self.read_buffer.get()
+        data = self._get()
 
-        if 'pix_dK' in data.keys():
+        # Nothing to draw: a failed acquisition attempt, or the final
+        # 'device_lost' item the client hands over before it ends. Keep
+        # the window responsive instead of raising on a missing frame.
+        if not data.get('success', True):
+            if data.get('device_lost'):
+                print(f"[{self.name}] Upstream reports the device as lost - "
+                      f"no further frames.")
+            cv2.waitKey(1)
+            return
+
+        # 'frame' is what every *_Client writes; 'pix_dK' / 'pix' are the
+        # per-driver keys the I2C/SPI clients still use
+        if 'frame' in data.keys():
+            frame = data['frame']
+        elif 'pix_dK' in data.keys():
             frame = data['pix_dK']
         else:
-            # print(data.keys())
             frame = data['pix']
 
         # Reshape if not the proper size
@@ -1018,6 +1139,16 @@ class ImshowProcess(RProcess_R1):
         panel = self.ptat_plot.render(frame.shape[1], frame.shape[0] // 3)
         return np.vstack([frame, panel])
 
+    def _on_idle(self):
+        """Called by RProcess_R1.run() while no item arrives. Keeps the
+        window responsive, so it still redraws and reacts to the window
+        manager while the stream has not started yet or the device is
+        gone."""
+        try:
+            cv2.waitKey(1)
+        except cv2.error:
+            pass
+
     def _teardown(self):
         # Window is destroyed here, inside the child process, once the
         # loop has exited -- this always runs (unlike the threading
@@ -1062,36 +1193,24 @@ class _RecordingTap:
     the real buffer and hands every item to a callback before returning it.
     Lets ImshowRecorderProcess reuse ImshowProcess._target() unchanged.
     All other attributes are forwarded to the real buffer.
- 
-    get() without arguments waits in slices of poll_s and calls on_idle()
-    in between, so commands are handled and the window stays responsive
-    even when no frames arrive (e.g. the device was lost). If exit_event is
-    set while waiting, queue.Empty is raised, which RProcess_R1.run()
-    treats as "nothing to do" -- its loop then sees the exit flag and ends.
+
+    This used to poll the buffer in slices itself and call an on_idle
+    callback in between, because the plain get() it wrapped would
+    otherwise have waited for an item forever. Waiting is RProcess_R1's
+    business now -- _get() reads with a timeout and run() calls
+    _on_idle() whenever one of them comes up empty -- so there is one
+    place left that decides how long a consumer waits, not two.
     """
- 
-    def __init__(self, buffer, on_item, on_idle=None, exit_event=None, poll_s=0.2):
+
+    def __init__(self, buffer, on_item):
         self._buffer = buffer
         self._on_item = on_item
-        self._on_idle = on_idle
-        self._exit_event = exit_event
-        self._poll_s = poll_s
- 
+
     def get(self, *args, **kwargs):
-        if args or kwargs or self._on_idle is None:
-            item = self._buffer.get(*args, **kwargs)
-        else:
-            while True:
-                try:
-                    item = self._buffer.get(timeout=self._poll_s)
-                    break
-                except queue.Empty:
-                    self._on_idle()
-                    if self._exit_event is not None and self._exit_event.is_set():
-                        raise
+        item = self._buffer.get(*args, **kwargs)
         self._on_item(item)
         return item
- 
+
     def __getattr__(self, attr):
         return getattr(self._buffer, attr)
  
@@ -1292,11 +1411,9 @@ class ImshowRecorderProcess(ImshowProcess):
         self._device_lost = False          # upstream reported that its device is gone
  
         # Every item ImshowProcess._target() gets from the buffer passes
-        # through _on_frame() first; while no items arrive, _on_idle() runs
-        # every 0.2 s
-        self.read_buffer = _RecordingTap(self.read_buffer, self._on_frame,
-                                         on_idle=self._on_idle,
-                                         exit_event=self._exit)
+        # through _on_frame() first. While none arrive, RProcess_R1's loop
+        # calls _on_idle() instead, once per self.get_timeout seconds.
+        self.read_buffer = _RecordingTap(self.read_buffer, self._on_frame)
  
     def _on_frame(self, data):
         """Called by _RecordingTap for every item, before it is displayed."""
@@ -1318,7 +1435,7 @@ class ImshowRecorderProcess(ImshowProcess):
         self._update_title()
  
     def _on_idle(self):
-        """Called by _RecordingTap while no item arrives."""
+        """Called by RProcess_R1.run() while no item arrives."""
         self._poll_commands()
         self._update_title()
         try:
@@ -1586,10 +1703,11 @@ class PlotTimeSeries_Process(RProcess_R1):
  
     def _target(self):
  
-        # Get result from upstream process. The timeout keeps the window
-        # responsive and lets stop() end the loop while no data arrives.
+        # Get result from upstream process. _get() waits with a timeout,
+        # so stop() ends the loop and the window stays responsive while no
+        # data arrives.
         try:
-            data = self.read_buffer.get(timeout=0.1)
+            data = self._get()
         except queue.Empty:
             self._on_idle()
             cv2.waitKey(1)
@@ -1633,8 +1751,8 @@ class PlotTimeSeries_Process(RProcess_R1):
         pass
  
     def _on_idle(self):
-        """Called every 0.1 s while no item arrives. Override in
-        subclasses."""
+        """Called once per self.get_timeout seconds while no item
+        arrives. Override in subclasses."""
         pass
  
     def _create_plots(self, data):

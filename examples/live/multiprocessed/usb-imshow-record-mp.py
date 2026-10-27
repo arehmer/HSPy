@@ -21,7 +21,6 @@ Usage:
 """
 
 import multiprocessing as mp
-import threading
 import argparse
 import time
 
@@ -138,14 +137,9 @@ if __name__ == '__main__':
                       f"the device may still be streaming.")
 
         # Then the Imshow processes. stop() also saves a running recording.
-        # Wake processes blocked in read_buffer.get() with a dummy item (put
-        # from a background thread, so a full buffer can't block shutdown).
+        # Each polls its buffer with a timeout, so stop() is all they need.
         for plot_process in plot_processes:
             plot_process.stop()
-        for usb_buffer in buffers:
-            threading.Thread(target=usb_buffer.put,
-                             args=({'success': False},),
-                             daemon=True).start()
 
         # An Imshow process only exits once its recordings are completely
         # written -- so no short timeout here
