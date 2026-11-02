@@ -250,6 +250,7 @@ class UDP_Client(WThread_R1):
                  stream_cmd: bytes = b'K',
                  lost_after_s: float = 5.0,
                  first_frame_after_s: float = 15.0,
+                 first_frame_timeout: float = 5.0,
                  **kwargs):
         """
         Parameters
@@ -280,6 +281,15 @@ class UDP_Client(WThread_R1):
             stream command was sent. A device can need a while to start
             sending, which is not the same failure as a device that was
             streaming and stopped, so it gets its own, larger budget.
+        first_frame_timeout : float
+            Socket timeout for the read that waits for the device to
+            start sending. The socket's own timeout is sized for a
+            running stream and expires long before a device has acted on
+            the stream command, which produced one spurious error per
+            start. Used until the first frame has arrived, then the
+            socket's timeout takes over again. Capped at
+            first_frame_after_s: a read in progress delays both the
+            watchdog and stop().
 
         Returns
         -------
@@ -305,6 +315,7 @@ class UDP_Client(WThread_R1):
         self.stream_cmd = stream_cmd
         self.lost_after_s = lost_after_s
         self.first_frame_after_s = first_frame_after_s
+        self.first_frame_timeout = first_frame_timeout
 
         # Set when the device is lost; check with udp_thread.device_lost.is_set()
         self.device_lost = threading.Event()
@@ -337,6 +348,12 @@ class UDP_Client(WThread_R1):
         # _t_last_frame stays None until a frame has actually arrived.
         self._t_stream_start = None
         self._t_last_frame = None
+
+        # The first read waits longer than the ones after it, but never
+        # longer than the budget the first frame has anyway -- the loop
+        # notices stop() and device loss only between reads.
+        self._first_read_timeout = min(self.first_frame_timeout,
+                                       self.first_frame_after_s)
 
         try:
             if (self.DevID != -1) and (len(self.Bcast_Addr) != 0):
@@ -375,8 +392,16 @@ class UDP_Client(WThread_R1):
     def _target(self):
 
         try:
-            # Try to assemble a frame from the udp packages
-            frame = self.udp_reader.read_continuous_bytestream(self.DevID)
+            # Try to assemble a frame from the udp packages. Until the
+            # first one has arrived the read gets the longer
+            # first_frame_timeout: the device needs a moment to act on
+            # the stream command, which is not an error.
+            if self._t_last_frame is None:
+                frame = self.udp_reader.read_continuous_bytestream(
+                    self.DevID,
+                    first_frame_timeout=self._first_read_timeout)
+            else:
+                frame = self.udp_reader.read_continuous_bytestream(self.DevID)
 
         except Exception as e:
 
