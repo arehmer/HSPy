@@ -525,9 +525,23 @@ class HTPA_ByteStream_Converter():
             for i in idx:    
                 self.data[j] = int.from_bytes(package[i:i+2], byteorder='little')
                 j = j+1
-                
-        
-        return self.data
+
+
+        # Parse the flat data array into a dictionary with the same keys as
+        # DataCols. self.data is ordered like DataCols.all(), i.e. the groups
+        # follow each other in the order in which DataCols declares them, so
+        # every group is just the next len(cols) values. Each slice is copied,
+        # so that the returned arrays are no views on self.data, which is
+        # overwritten by the next call
+        data_dict = {}
+        offset = 0
+
+        for group,cols in self.tparray.DataCols.as_dict().items():
+            group_data = self.data[offset:offset+len(cols)]
+            data_dict[group] = group_data.ravel().copy()
+            offset = offset + len(cols)
+
+        return data_dict
     
     def _bytes_to_pd(self,byte_stream:list):
         

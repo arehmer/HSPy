@@ -397,11 +397,11 @@ class UDP_Client(WThread_R1):
             # first_frame_timeout: the device needs a moment to act on
             # the stream command, which is not an error.
             if self._t_last_frame is None:
-                frame = self.udp_reader.read_continuous_bytestream(
+                udp_data = self.udp_reader.read_continuous_bytestream(
                     self.DevID,
                     first_frame_timeout=self._first_read_timeout)
             else:
-                frame = self.udp_reader.read_continuous_bytestream(self.DevID)
+                udp_data = self.udp_reader.read_continuous_bytestream(self.DevID)
 
         except Exception as e:
 
@@ -447,7 +447,7 @@ class UDP_Client(WThread_R1):
 
             # Set success flag and store frame
             result = {'success': True}
-            result['frame'] = frame
+            result['frame'] = udp_data['pix']
 
         # Store image_id and device ID
         result['image_id'] = self.image_id

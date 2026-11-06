@@ -586,11 +586,11 @@ class UDP_ClientProcess(WProcess_R1):
             # first_frame_timeout: the device needs a moment to act on
             # the stream command, which is not an error.
             if self._t_last_frame is None:
-                frame = self.udp_reader.read_continuous_bytestream(
+                udp_data = self.udp_reader.read_continuous_bytestream(
                     self.DevID,
                     first_frame_timeout=self._first_read_timeout)
             else:
-                frame = self.udp_reader.read_continuous_bytestream(self.DevID)
+                udp_data = self.udp_reader.read_continuous_bytestream(self.DevID)
 
         except Exception as e:
 
@@ -636,7 +636,7 @@ class UDP_ClientProcess(WProcess_R1):
 
             # Set success flag and store frame
             result = {'success': True}
-            result['frame'] = frame
+            result['frame'] = udp_data['pix']
 
         # Store image_id and device ID
         result['image_id'] = self.image_id
@@ -1078,6 +1078,7 @@ class ImshowProcess(RProcess_R1):
         self.window_name = window_name
         self.plot_ptat = plot_ptat                                       # ADDED
         self.plot_window_s = plot_window_s                               # ADDED
+        self._k = 0
 
         super().__init__(name=name,
                          read_buffer=read_buffer,
@@ -1100,9 +1101,18 @@ class ImshowProcess(RProcess_R1):
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
     def _target(self):
+        
 
+        
         # Get result from upstream process
         data = self._get()
+        
+        # # Store data    
+        # rec_path = Path.cwd() / 'rec' # db
+        # rec_path.mkdir(exist_ok= True, parents=True) # db
+        # pkl.dump(data,open(rec_path / f'{self._k}.pkl','wb')) # db
+        # self._k +=1 # db
+
 
         # Nothing to draw: a failed acquisition attempt, or the final
         # 'device_lost' item the client hands over before it ends. Keep
@@ -1122,12 +1132,28 @@ class ImshowProcess(RProcess_R1):
             frame = data['pix_dK']
         else:
             frame = data['pix']
+            
+        
+        if 'inference' in data.keys():
+            if data['inference']['BackgroundSub']['frame'] is not None:
+                frame = data['inference']['ShrinkCenter']['frame']
+                # pkl.dump(frame_db,open('frame_awa_db.pkl','wb'))
 
+                # From BackgroundSub on, the pipeline's frame may carry two
+                # channels (0: background-subtracted, 1: the frame that entered
+                # the subtraction). Display the background-subtracted one --
+                # cvtColor(GRAY2RGB) below needs a single-channel image.
+                # ascontiguousarray because frame[...,0] of an (H,W,2) array is
+                # strided, which the cv2 calls below reject.
+                if frame is not None and frame.ndim == 3:
+                    frame = np.ascontiguousarray(frame[..., 0])
+        # print('db2')
         # Reshape if not the proper size
         if frame.ndim == 1:
             frame = frame[0:self.num_pix]
             frame = frame.reshape(self.tparray._npsize)
-
+        # print('db3')
+        # print(f'frame.shape: {frame.shape}')
         # Convert to opencv type
         frame = cv2.normalize(frame, frame, 0, 255, cv2.NORM_MINMAX)
         frame = frame.astype(np.uint8)
@@ -1138,7 +1164,19 @@ class ImshowProcess(RProcess_R1):
 
         # Convert frame to RGB to be able to plot colored boxes
         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-
+        
+        # print('db4')
+        # Find annotations in passed data
+        annot_exist = False
+        if 'inference' in data.keys():
+            if 'YOLO_EnDecode_Engine' in data['inference'].keys():
+                bboxes = data['inference']['YOLO_EnDecode_Engine']
+                bboxes.rename(columns={'conf':'score'}, inplace=True)
+                bboxes['confirmed'] = True
+                annot_exist = True
+        print(bboxes)      
+        # print('db5')
+        
         # Draw bounding boxes / annotations, if present
         if 'annot_frame' in data.keys():
 
@@ -1146,51 +1184,55 @@ class ImshowProcess(RProcess_R1):
             annotations['confirmed'] = False
             annotations.loc[annotations['label'] == 1, 'confirmed'] = True
             bboxes = annotations
-
+            annot_exist = True
+        # print('db6')
+        if annot_exist:
+            # print('db7')
             font = cv2.FONT_HERSHEY_SIMPLEX
             fontScale = 0.4
             fontColor = (255, 255, 0)
             thickness = 1
             lineType = 2
-
+            # print('db8')
             for b in bboxes.index:
-
+                # print('db9')
                 box = bboxes.loc[[b]]
-
+                
                 if box['confirmed'].item() != True:
                     continue
-
+                # print('db1')
                 x, y = int(box['xtl'].item()), int(box['ytl'].item())
                 w = int(box['xbr'].item()) - int(box['xtl'].item())
                 h = int(box['ybr'].item()) - int(box['ytl'].item())
-
+                # print('db2')
                 # Scale coordinates
                 x = int(sf * x); y = int(sf * y); w = int(sf * w); h = int(sf * h)
-
+                # print('db3')
                 frame = cv2.rectangle(frame,
                                       (x, y),
                                       (x + w, y + h),
                                       (255, 255, 0), 1)
-
+                # print('db4')
                 # Write score if it exists
                 if box['score'].item() != -99:
                     score = f"{box['score'].item():.2}"
                     cv2.putText(frame, score, (x + 1, y + 10), font,
-                               fontScale, fontColor, thickness, lineType)
+                                fontScale, fontColor, thickness, lineType)
+                # print('db5')
+            # # Write the number of persons in the upper left corner
+            # num_persons = sum(bboxes['confirmed'] == True)
 
-            # Write the number of persons in the upper left corner
-            num_persons = sum(bboxes['confirmed'] == True)
-
-            cv2.putText(frame,
-                        f'Number of persons: {num_persons}',
-                        (0, 20), font, fontScale, fontColor, thickness, lineType)
+            # cv2.putText(frame,
+            #             f'Number of persons: {num_persons}',
+            #             (0, 20), font, fontScale, fontColor, thickness, lineType)
 
         # PTAT plot below the image                                      # ADDED
         if self.plot_ptat:                                               # ADDED
             frame = self._add_ptat_plot(frame, data)                     # ADDED
-
+        # print('db6')
         cv2.imshow(self.window_name, frame)
         cv2.waitKey(1)
+        # print('db7')
 
     def _add_ptat_plot(self, frame, data):                               # ADDED
         """Append data['ptat_avg'] to the history and stack the plot
