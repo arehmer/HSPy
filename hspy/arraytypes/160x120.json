@@ -17,6 +17,11 @@
 		"adr_start": "0x08",
 		"adr_stop":  "0x08"},
 
+	"Tablenumber": {
+		"dtype": "uint16",
+		"adr_start": "0x0B",
+		"adr_stop":  "0x0C"},
+
 	"epsilon": {
 		"dtype": "uint8",
 		"adr_start": "0x0D",

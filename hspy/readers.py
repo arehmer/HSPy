@@ -24,6 +24,17 @@ import platform
 from .tparray import TPArray
 
 
+class HTPA_UDPTimeout(TimeoutError):
+    """
+    A bound device sent nothing within the socket's timeout.
+
+    Raised by HTPA_UDPReader.read_continuous_bytestream() so that a caller
+    can tell "the device is not answering" apart from "the device sent a
+    frame". Subclasses TimeoutError, so code that only catches OSError /
+    socket.timeout keeps working.
+    """
+
+
 class HTPAdGUI_FileReader():
     
     def __init__(self,tparray = None):
@@ -514,9 +525,23 @@ class HTPA_ByteStream_Converter():
             for i in idx:    
                 self.data[j] = int.from_bytes(package[i:i+2], byteorder='little')
                 j = j+1
-                
-        
-        return self.data
+
+
+        # Parse the flat data array into a dictionary with the same keys as
+        # DataCols. self.data is ordered like DataCols.all(), i.e. the groups
+        # follow each other in the order in which DataCols declares them, so
+        # every group is just the next len(cols) values. Each slice is copied,
+        # so that the returned arrays are no views on self.data, which is
+        # overwritten by the next call
+        data_dict = {}
+        offset = 0
+
+        for group,cols in self.tparray.DataCols.as_dict().items():
+            group_data = self.data[offset:offset+len(cols)]
+            data_dict[group] = group_data.ravel().copy()
+            offset = offset + len(cols)
+
+        return data_dict
     
     def _bytes_to_pd(self,byte_stream:list):
         
@@ -812,7 +837,7 @@ class HTPA_UDPReader():
         udp_socket.connect(server_address)   
                
         # Set timeout to 1 second
-        udp_socket.settimeout(1)
+        udp_socket.settimeout(2)
         
         # Stop any stream that might still continue, e.g. if program 
         # crashed 
@@ -990,23 +1015,35 @@ class HTPA_UDPReader():
             
         return answ    
             
-    def start_continuous_bytestream(self,dev_id):
-        
+    def start_continuous_bytestream(self,dev_id,cmd=b'K'):
+        """
+        Parameters
+        ----------
+        dev_id : int
+            DevID of a bound device.
+        cmd : bytes
+            Command that starts the stream. b'K' (default) streams pixel
+            values in dK. Configurable so that UDP_Client /
+            UDP_ClientProcess can expose the same stream_cmd argument as
+            their USB counterparts.
+        """
+
         # Get device information from the device list
         dev_info = self.devices.loc[[dev_id]]
-        
+
         # If more than one devices have the same device id, return error
         if len(dev_info) != 1:
             Exception('Multiple devices have the same device id.')
-        
+
         # Get udp socket
         udp_socket = self.sockets[dev_id]
-                
+
         # Create server address
         server_address = (dev_info['IP'].item(), self.port)
 
         # Send message to device to start streaming bytes
-        _ = udp_socket.sendto(bytes('K','utf-8'),server_address)
+        cmd = cmd.encode('utf-8') if isinstance(cmd,str) else bytes(cmd)
+        _ = udp_socket.sendto(cmd,server_address)
 
     def stop_continuous_bytestream(self,**kwargs):
         
@@ -1057,8 +1094,35 @@ class HTPA_UDPReader():
         
         return answ
     
-    def read_continuous_bytestream(self,dev_id):
-        
+    def read_continuous_bytestream(self,dev_id,first_frame_timeout=None):
+        """
+        Assemble one frame from the continuous bytestream of a bound
+        device.
+
+        Parameters
+        ----------
+        dev_id : int
+            DevID of a bound device.
+        first_frame_timeout : float, optional
+            Timeout in seconds for the read that waits for the device to
+            start sending (the sync read, see below). The socket's own
+            timeout is sized for a device that is already streaming,
+            which a device that was just handed its stream command is
+            not: it can take seconds before the first package appears.
+            Pass this while waiting for the first frame to keep that
+            delay from looking like a lost device. None (default) leaves
+            the socket's timeout alone.
+
+        Raises
+        ------
+        HTPA_UDPTimeout
+            If the device sent nothing within the socket's timeout. This
+            used to return a frame of zeros instead, which made an
+            unplugged device indistinguishable from a working one sending
+            black frames -- UDP_Client / UDP_ClientProcess rely on the
+            exception to notice that the device is gone.
+        """
+
         # Get device information from the device list
         dev_info = self.devices.loc[[dev_id]]
         
@@ -1073,7 +1137,17 @@ class HTPA_UDPReader():
         
         # Get udp socket
         udp_socket = self.sockets[dev_id]
-        
+
+        # The socket's timeout applies between two packages of a stream
+        # that is running. Waiting for a device to START sending is a
+        # different kind of wait, and a much longer one, so it gets its
+        # own timeout if the caller asked for one. Restored below before
+        # this method returns or raises, so the stream itself keeps
+        # reading at its own pace.
+        stream_timeout = udp_socket.gettimeout()
+        sync_timeout = (stream_timeout if first_frame_timeout is None
+                        else first_frame_timeout)
+
         # Create variable that indicates if DataFrame was constructed success-
         # fully
         success = False
@@ -1084,16 +1158,22 @@ class HTPA_UDPReader():
             
             # Read incoming packages until one with the package index 1 is received
             sync = False
-            
+
+            # This is the read that may have to wait for the device
+            udp_socket.settimeout(sync_timeout)
+
             while sync == False:
-                
+
                 # Receive package
                 try:
                     package = udp_socket.recv(self.tparray._package_size)
                 except socket.timeout:
-                    warnings.warn('Socket timeout!')
-                    return np.zeros((len(self.tparray._serial_data_order),))
-                    
+                    udp_socket.settimeout(stream_timeout)
+                    raise HTPA_UDPTimeout(f'Socket timeout ({sync_timeout} s) '
+                                          f'while waiting for the first '
+                                          f'package of a frame from device '
+                                          f'{dev_id}.')
+
                 
                 # Check package index
                 # Exception for (32,32)
@@ -1111,14 +1191,21 @@ class HTPA_UDPReader():
                 if package_index == 1:
                     packages.append(package)
                     sync = True
-            
+
+            # Synced: the device is sending, so the rest of this frame is
+            # expected at the stream's own pace again
+            udp_socket.settimeout(stream_timeout)
+
             for p in range(2,self.tparray._package_num+1):
-                
+
                 # Receive package
                 try:
                     package = udp_socket.recv(self.tparray._package_size)
                 except socket.timeout:
-                    return np.zeros((len(self.tparray._serial_data_order),))
+                    raise HTPA_UDPTimeout(f'Socket timeout after package '
+                                          f'{p-1} of '
+                                          f'{self.tparray._package_num} '
+                                          f'from device {dev_id}.')
 
                 # Get index of package
                 # Exception for (32,32)

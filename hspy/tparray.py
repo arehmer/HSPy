@@ -33,6 +33,7 @@ SensorTypes = {'HTPA60x40D_L1K9_0K8':0,
                'HTPA80x64dR2_L10k5_0k95_F7k7':5,
                'HTPA32x32dR2_L1k7_0k8':6,
                'HTPA32x32dR2_L1k7_0k8_THiC_Si':7,
+               'HTPA160x120dR1_L5k7_0k8'
                'SENSOR_TYPE_NONE' : 99}
 
 ArrayTypes = {'HTPA8x8' : 0,

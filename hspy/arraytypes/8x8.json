@@ -17,6 +17,11 @@
 		"adr_start": "0x10",
 		"adr_stop":  "0x10"},
 
+	"Tablenumber": {
+		"dtype": "uint16",
+		"adr_start": "0x0B",
+		"adr_stop":  "0x0C"},
+
 	"epsilon": {
 		"dtype": "uint8",
 		"adr_start": "0x1A",
@@ -26,18 +31,18 @@
 		"dtype": "float32",
 		"adr_start": "0x68",
 		"adr_stop":  "0x6B"},
-		
+
 	"ptatOffset": {
 		"dtype": "float32",
 		"adr_start": "0x6C",
 		"adr_stop":  "0x6F"},
-		
+
 
 	"globalGain": {
 		"dtype": "uint16",
 		"adr_start": "0x12",
 		"adr_stop": "0x13"},
-		
+
 
 	"thGrad": {
 		"dtype": "int16",

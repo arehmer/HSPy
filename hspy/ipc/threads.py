@@ -9,7 +9,11 @@ import cv2
 import socket
 import struct
 
+from typing import List, Optional, Sequence, Tuple, Union
+
+import queue
 from queue import Queue
+import threading
 from threading import Condition
 
 import numpy as np
@@ -19,121 +23,474 @@ from datetime import datetime
 import pickle as pkl
 
 
-from hspytools.ipc.threads_base import WThread,RThread, RWThread
-from hspytools.readers import HTPA_UDPReader
-from hspytools.tparray import TPArray
+from hspy.ipc.threads_base import WThread,RThread, RWThread
+from hspy.readers import HTPA_UDPReader
+from hspy.tparray import TPArray
 
 from collections import deque
 
 from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread
 from hspy.readers import HTPA_UDPReader
-from hspytools.tparray import TPArray
+from hspy.tparray import TPArray
 
 from hspy.drivers.i2c import I2C_HTPA32x32d
+from hspy.drivers.usb import USB_HTPA
+
+from hspy.ipc.plot_utils import TimeSeriesPlot
 
 
-
-class UDP_Client(WThread_R1):
+class USB_Client(WThread_R1):
     """
-    Class for running HTPA_UDP_Reader in a thread. Can only bind one device
-    at this point
+    Runs a USB_HTPA driver in its own thread: starts the device's frame
+    stream and repeatedly puts acquired frames into write_buffer.
+
+    As with I2C_Client, the driver is constructed (and therefore opened and
+    initialised) by the caller and handed in -- a thread shares the parent
+    process's memory, so this is safe. The thread is the only one that
+    talks to the device while it runs: the stream is started in _setup()
+    and stopped in _teardown(), both of which run inside this thread.
+
+    Losing the device (unplugged, cable fault, or no frame for lost_after_s
+    seconds) is reported ONCE; the thread then puts one final item
+    {'success': False, 'device_lost': True, ...} into write_buffer, sets
+    the device_lost event and ends. Other errors are printed once per
+    distinct message, not on every attempt.
+
+    Every item put into write_buffer carries 'success', 'image_id' and
+    'DevID'; a successful one additionally carries 'frame' (the pixel
+    values) plus everything USB_HTPA.acquire_frame() returned ('pix',
+    'aux', 'ptat_avg', 't', 'serial_number', ...).
     """
-    
+
     def __init__(self,
-                 udp_reader:HTPA_UDPReader,
-                 write_buffer:Queue,
-                 IP:str = '',
-                 DevID:int = -1,
-                 Bcast_Addr:str = '',
+                 usb_driver,
+                 write_buffer,
+                 stream_cmd: bytes = b't',
+                 name: str = 'usb_thread',
+                 lost_after_s: float = 5.0,
+                 DevID: int = -1,
                  **kwargs):
         """
         Parameters
         ----------
-        udp_reader : HTPA_UDP_Reader
-            DESCRIPTION.
-        IP : str
-            DESCRIPTION.
-        start_trigger : Event
-            DESCRIPTION.
-        finish_trigger : Event
-            DESCRIPTION.
+        usb_driver : USB_HTPA
+            Opened and initialised driver instance.
+        write_buffer : queue.Queue
+            Buffer that acquired frames are put into.
+        stream_cmd : bytes
+            Command that starts the stream. b't' (default) streams pixel
+            values the device has already converted; b'K' streams them in
+            dK, which additionally end up in result['pix_dK'].
+        name : str
+            Thread name.
+        lost_after_s : float
+            If no frame could be read for this long (only errors), the
+            device is considered lost even if the driver did not report a
+            disconnect.
+        DevID : int
+            Optional device number, copied into every result as
+            result['DevID'] so a consumer fed by several clients can tell
+            them apart. -1 (default) means "not set"; USB devices are
+            identified by result['serial_number'] anyway.
 
         Returns
         -------
         None.
 
         """
-        
-        # self.output_type = kwargs.pop('output_type','np')
-        
-        # Set UDP Reader object as attribute
-        self.udp_reader = udp_reader
-        
-        # Depending on whether the devices IP or the Device ID along with the 
-        # broadcast address are provided, the process of finding and 
-        # binding the corresponding htpa device differs
-        if (DevID!=-1) and (len(Bcast_Addr)!=0):
-            self.udp_reader.broadcast(Bcast_Addr)
-            self.udp_reader.bind_tparray(DevID = DevID)
-            
-            # Save DevID of bound device to attribute
-            self.DevID = DevID
-        elif len(IP)!=0:
-            self.udp_reader.bind_tparray(IP = IP)
-            
-            # Save DevID of bound device to attribute
-            devices = self.udp_reader.devices
-            self.DevID = devices[devices['IP']==IP].index.item()
-        else:
-            print('Either IP or DevID and Bcast_Addr of the device to be ' +\
-                  'bound have to be specified!')
-        
-        # Start continuous bytestream 
-        self.udp_reader.start_continuous_bytestream(self.DevID)
-        
+
+        self.usb_driver = usb_driver
+        self.stream_cmd = stream_cmd
+        self.lost_after_s = lost_after_s
+        self.DevID = DevID
+
+        # Set when the device is lost; check with usb_thread.device_lost.is_set()
+        self.device_lost = threading.Event()
+
+        super().__init__(name=name,
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    # -- Thread body (the loop itself lives in WThread_R1.run) ---------------
+
+    def _setup(self):
+
         # Set image_id counter
         self.image_id = 0
-        
-        # Set time
-        self.t0 = time.time()
-        
-        super().__init__(name = 'udp_thread',
-                         write_buffer = write_buffer,
-                         **kwargs)
-            
-    def _target(self):
-        
-        # print('Executed upd thread: ' + str(time.time()-self.t0) )
-        
-        # Dictionary for storing results in
-        result = {}
-        
-        try:
-            # Try to assemble a frame from the udp packages
-            frame = self.udp_reader.read_continuous_bytestream(self.DevID)
 
-            # Set success flag and store frame
-            result['success'] = True
-            result['frame'] = frame    
-        except:
-            # Set success flag to False in case of failure
-            result['success'] = False
-        
-        # Store image_id
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
+        self.t0 = time.time()
+        self._t_last_frame = time.monotonic()
+
+        # Start continuous frame stream
+        try:
+            resp = self.usb_driver.start_stream(self.stream_cmd)
+        except Exception as e:
+            # Device gone / not usable: report once and end the thread (the
+            # loop in run() does not start because _device_lost sets _exit)
+            self._device_lost(f"could not start the stream: {e}")
+            self._put(self._lost_item())
+            return
+
+        print(f"[{self.name}] Stream started: {resp!r}")
+
+    def _target(self):
+
+        try:
+            # Acquire one frame from the stream
+            data = self.usb_driver.acquire_frame()
+
+        except Exception as e:
+
+            # Device gone, or errors only for too long: report once, hand a
+            # final 'device_lost' item to the consumer, end the loop
+            if not self.usb_driver.is_connected:
+                self._device_lost(str(e))
+                return self._lost_item()
+            if time.monotonic() - self._t_last_frame > self.lost_after_s:
+                self._device_lost(f"no frame for {self.lost_after_s:g} s "
+                                  f"(last error: {e})")
+                return self._lost_item()
+
+            # Other errors: print each distinct message once, don't spin
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+            time.sleep(0.05)
+
+            result = {'success': False}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Receiving frames again "
+                      f"({self._n_errors} failed attempt(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+            self._t_last_frame = time.monotonic()
+
+            # Set success flag and store frame data
+            result = {'success': True}
+            result.update(data)
+
+            # Canonical key every client writes, whatever the transport is
+            result['frame'] = data['pix']
+
+        # Store image_id and device number
         result['image_id'] = self.image_id
-        
-        # Store device ID
         result['DevID'] = self.DevID
-        
+
         # Increment image_id
         self.image_id = self.image_id + 1
-               
+
         return result
-        
-    def stop(self):
-        
-        # Set attribute exit to stop run method of thread
+
+    def _device_lost(self, reason: str):
+        """Report the loss once, flag it for the caller, end the loop."""
+        print(f"[{self.name}] Connection to device {self.usb_driver.serial_number} "
+              f"LOST: {reason}. Continuing without it.")
+        self.device_lost.set()
         self._exit.set()
+
+    def _lost_item(self) -> dict:
+        """Final item for the consumer: tells it that no more frames come."""
+        return {'success': False,
+                'device_lost': True,
+                'serial_number': self.usb_driver.serial_number,
+                'image_id': self.image_id,
+                'DevID': self.DevID}
+
+    def _teardown(self):
+        # Runs inside this thread once the loop has exited (stop() was
+        # called, or the device was lost), so the device is never accessed
+        # from two threads at once. Closing the driver is left to whoever
+        # created it (same ownership as with I2C_Client).
+        if self.usb_driver.is_streaming and self.usb_driver.is_connected:
+            try:
+                resp, _ = self.usb_driver.stop_stream()
+                print(f"[{self.name}] Stream stopped: {resp!r}")
+            except Exception as e:
+                print(f"[{self.name}] Stopping stream failed: {e}")
+
+
+class UDP_Client(WThread_R1):
+    """
+    Runs an HTPA_UDPReader in its own thread: binds one HTPA device,
+    starts its continuous bytestream and repeatedly puts assembled frames
+    into write_buffer. Can only bind one device at this point.
+
+    Same shape as USB_Client: the reader is constructed by the caller and
+    handed in, but everything that touches the device -- discovery,
+    binding, starting the stream -- happens in _setup(), i.e. inside this
+    thread, and is undone in _teardown().
+
+    Losing the device is reported ONCE; the thread then puts one final
+    item {'success': False, 'device_lost': True, ...} into write_buffer,
+    sets the device_lost event and ends. "Lost" means unplugged, network
+    down, no first frame within first_frame_after_s of the stream
+    starting, or no complete frame for lost_after_s after the last good
+    one. Other errors are printed once per distinct message, not on every
+    attempt.
+
+    Every item put into write_buffer carries 'success', 'image_id' and
+    'DevID'; a successful one additionally carries 'frame'.
+    """
+
+    def __init__(self,
+                 udp_reader: HTPA_UDPReader,
+                 write_buffer: Queue,
+                 name: str = 'udp_thread',
+                 IP: str = '',
+                 DevID: int = -1,
+                 Bcast_Addr: str = '',
+                 stream_cmd: bytes = b'K',
+                 lost_after_s: float = 5.0,
+                 first_frame_after_s: float = 15.0,
+                 first_frame_timeout: float = 5.0,
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        udp_reader : HTPA_UDPReader
+            Reader instance. It does not have to be bound to a device yet
+            -- binding happens in _setup(), inside this thread.
+        write_buffer : Queue
+            Buffer that assembled frames are put into.
+        name : str
+            Thread name. Give each thread a distinct name when running
+            several devices.
+        IP : str
+            IP of the device to bind. Alternative to DevID + Bcast_Addr.
+        DevID : int
+            Device number of the device to bind. Requires Bcast_Addr.
+        Bcast_Addr : str
+            Broadcast address of the subnet the device lives in.
+        stream_cmd : bytes
+            Command that starts the continuous bytestream. b'K' (default)
+            streams pixel values in dK.
+        lost_after_s : float
+            If no complete frame could be assembled for this long after
+            the last good one (only errors / socket timeouts), the device
+            is considered lost.
+        first_frame_after_s : float
+            Budget for the FIRST frame, measured from the moment the
+            stream command was sent. A device can need a while to start
+            sending, which is not the same failure as a device that was
+            streaming and stopped, so it gets its own, larger budget.
+        first_frame_timeout : float
+            Socket timeout for the read that waits for the device to
+            start sending. The socket's own timeout is sized for a
+            running stream and expires long before a device has acted on
+            the stream command, which produced one spurious error per
+            start. Used until the first frame has arrived, then the
+            socket's timeout takes over again. Capped at
+            first_frame_after_s: a read in progress delays both the
+            watchdog and stop().
+
+        Returns
+        -------
+        None.
+
+        """
+
+        # Depending on whether the device's IP or the Device ID along with
+        # the broadcast address are provided, the process of finding and
+        # binding the corresponding htpa device differs. Checked here, in
+        # the caller's thread, so a missing argument fails at construction
+        # instead of inside the worker a moment later.
+        if not ((DevID != -1 and len(Bcast_Addr) != 0) or len(IP) != 0):
+            raise ValueError('Either IP or DevID and Bcast_Addr of the '
+                             'device to be bound have to be specified!')
+
+        # Set UDP Reader object as attribute
+        self.udp_reader = udp_reader
+
+        self.IP = IP
+        self.DevID = DevID
+        self.Bcast_Addr = Bcast_Addr
+        self.stream_cmd = stream_cmd
+        self.lost_after_s = lost_after_s
+        self.first_frame_after_s = first_frame_after_s
+        self.first_frame_timeout = first_frame_timeout
+
+        # Set when the device is lost; check with udp_thread.device_lost.is_set()
+        self.device_lost = threading.Event()
+
+        # Set in _setup() once the device is actually bound, so _teardown()
+        # only releases what this thread really acquired
+        self._bound = False
+
+        super().__init__(name=name,
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _setup(self):
+
+        # Set image_id counter
+        self.image_id = 0
+
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
+        self.t0 = time.time()
+
+        # Watchdog reference, deliberately NOT stamped here: discovery and
+        # binding still lie ahead, and broadcast() alone always waits out
+        # its full 5 s RESPONSE_TIMEOUT. A clock started at this point is
+        # already past lost_after_s by the time the first read happens, so
+        # the very first socket timeout would be reported as a lost
+        # device. Both are stamped once the stream is really running, and
+        # _t_last_frame stays None until a frame has actually arrived.
+        self._t_stream_start = None
+        self._t_last_frame = None
+
+        # The first read waits longer than the ones after it, but never
+        # longer than the budget the first frame has anyway -- the loop
+        # notices stop() and device loss only between reads.
+        self._first_read_timeout = min(self.first_frame_timeout,
+                                       self.first_frame_after_s)
+
+        try:
+            if (self.DevID != -1) and (len(self.Bcast_Addr) != 0):
+                # Only discover if this reader does not know the device
+                # yet. broadcast() always waits out its full 5 s
+                # RESPONSE_TIMEOUT, and the caller has usually just run it
+                # to pick this DevID in the first place.
+                if self.DevID not in self.udp_reader.devices.index:
+                    self.udp_reader.broadcast(self.Bcast_Addr)
+                self.udp_reader.bind_tparray(DevID=self.DevID)
+            else:
+                self.udp_reader.bind_tparray(IP=self.IP)
+
+                # Save DevID of bound device to attribute
+                devices = self.udp_reader.devices
+                self.DevID = devices[devices['IP'] == self.IP].index.item()
+
+            self._bound = True
+
+            # Start continuous bytestream
+            self.udp_reader.start_continuous_bytestream(self.DevID,
+                                                        cmd=self.stream_cmd)
+
+            # From here on the device should be sending. This is what the
+            # watchdog measures against until the first frame arrives.
+            self._t_stream_start = time.monotonic()
+        except Exception as e:
+            # Device not reachable: report once and end the thread (the
+            # loop in run() does not start because _device_lost sets _exit)
+            self._device_lost(f"could not start the stream: {e}")
+            self._put(self._lost_item())
+            return
+
+        print(f"[{self.name}] Stream started for device {self.DevID}.")
+
+    def _target(self):
+
+        try:
+            # Try to assemble a frame from the udp packages. Until the
+            # first one has arrived the read gets the longer
+            # first_frame_timeout: the device needs a moment to act on
+            # the stream command, which is not an error.
+            if self._t_last_frame is None:
+                udp_data = self.udp_reader.read_continuous_bytestream(
+                    self.DevID,
+                    first_frame_timeout=self._first_read_timeout)
+            else:
+                udp_data = self.udp_reader.read_continuous_bytestream(self.DevID)
+
+        except Exception as e:
+
+            # Nothing but errors for too long: the device is gone (unplugged,
+            # network down, powered off). Report once, hand a final
+            # 'device_lost' item to the consumer, end the loop.
+            if self._t_last_frame is None:
+                # No frame has arrived yet, so there is nothing to be
+                # silent *since* -- the stream may simply not have started
+                # yet. Measured from the stream command instead, against
+                # its own budget.
+                if (self._t_stream_start is not None
+                        and time.monotonic() - self._t_stream_start
+                        > self.first_frame_after_s):
+                    self._device_lost(
+                        f"no frame within {self.first_frame_after_s:g} s of "
+                        f"starting the stream (last error: {e})")
+                    return self._lost_item()
+
+            elif time.monotonic() - self._t_last_frame > self.lost_after_s:
+                self._device_lost(f"no frame for {self.lost_after_s:g} s "
+                                  f"(last error: {e})")
+                return self._lost_item()
+
+            # Other errors (a single socket timeout, lost packets, ...):
+            # print each distinct message once, and don't spin
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+            time.sleep(0.05)
+
+            result = {'success': False}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Receiving frames again "
+                      f"({self._n_errors} failed attempt(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+            self._t_last_frame = time.monotonic()
+
+            # Set success flag and store frame
+            result = {'success': True}
+            result['frame'] = udp_data['pix']
+
+        # Store image_id and device ID
+        result['image_id'] = self.image_id
+        result['DevID'] = self.DevID
+
+        # Increment image_id
+        self.image_id = self.image_id + 1
+
+        return result
+
+    def _device_lost(self, reason: str):
+        """Report the loss once, flag it for the caller, end the loop."""
+        print(f"[{self.name}] Connection to device {self.DevID} LOST: "
+              f"{reason}. Continuing without it.")
+        self.device_lost.set()
+        self._exit.set()
+
+    def _lost_item(self) -> dict:
+        """Final item for the consumer: tells it that no more frames come."""
+        return {'success': False,
+                'device_lost': True,
+                'image_id': self.image_id,
+                'DevID': self.DevID}
+
+    def _teardown(self):
+        # Runs inside this thread once the loop has exited: stop the stream
+        # and give the device back, so it is not left streaming into a
+        # closed socket. The reader object itself belongs to whoever
+        # created it (same ownership as with USB_Client).
+        if not self._bound:
+            return
+        self._bound = False
+
+        try:
+            self.udp_reader.stop_continuous_bytestream(DevID=self.DevID)
+            print(f"[{self.name}] Stream stopped.")
+        except Exception as e:
+            print(f"[{self.name}] Stopping stream failed: {e}")
+
+        try:
+            self.udp_reader.release_tparray(self.DevID)
+        except Exception as e:
+            print(f"[{self.name}] Releasing device failed: {e}")
 
 
 class I2C_Client(WThread_R1):
@@ -274,7 +631,7 @@ class UDP_PickleServer(RThread_R1):
 
         # Get data (e.g. a dict with a numpy array / pandas DataFrame)
         # from the upstream buffer
-        data = self.read_buffer.get()
+        data = self._get()
 
         # Serialize it
         payload = pkl.dumps(data)
@@ -375,134 +732,315 @@ class UDP_PickleClient(WThread_R1):
         self._socket.close()
 
 
+
+ 
+ 
+class ImshowDisplay(threading.Thread):
+    """
+    The only thread that calls OpenCV HighGUI functions. Other threads call
+    its namedWindow / imshow / setWindowTitle / destroyWindow methods
+    (same signatures as cv2), which only queue the request and return
+    immediately; this thread carries them out.
+ 
+    Only the newest image per window is shown: if Imshow threads deliver
+    faster than the display can draw, older images are skipped instead of
+    piling up -- the Imshow threads are never blocked.
+ 
+    New windows are tiled across the screen (window_size, columns), so
+    several windows don't open on top of each other.
+    """
+ 
+    def __init__(self,
+                 name: str = 'imshow_display',
+                 window_size: Optional[Tuple[int, int]] = (640, 480),
+                 columns: int = 3,
+                 origin: Tuple[int, int] = (20, 20),
+                 spacing: Tuple[int, int] = (20, 60),
+                 period_s: float = 0.01):
+        """
+        Parameters
+        ----------
+        window_size : (width, height) every new window is resized to, or
+                      None to keep OpenCV's default size (and position).
+        columns     : windows per row when tiling.
+        origin      : screen position of the first window.
+        spacing     : (x, y) gap between windows (y includes the title bar).
+        period_s    : max. time between two waitKey() calls, i.e. how often
+                      windows are serviced (repaint, move, resize) even
+                      when no new image arrives.
+        """
+        super().__init__(name=name, daemon=True)
+ 
+        self.window_size = window_size
+        self.columns = columns
+        self.origin = origin
+        self.spacing = spacing
+        self.period_s = period_s
+ 
+        self._lock = threading.Lock()
+        self._ops = deque()            # window operations, in call order
+        self._frames = {}              # window name -> newest image not yet shown
+        self._wakeup = threading.Event()
+        self._exit = threading.Event()
+ 
+        # Only touched by this thread
+        self._open = []                # windows created, in creation order
+        self._n_created = 0
+ 
+    # ── cv2-compatible API (called from any thread) ──────────────────────
+ 
+    def namedWindow(self, winname: str, flags: int = cv2.WINDOW_NORMAL) -> None:
+        self._queue_op(('create', winname, flags))
+ 
+    def imshow(self, winname: str, mat: np.ndarray) -> None:
+        with self._lock:
+            self._frames[winname] = mat          # replaces an older, unshown image
+        self._wakeup.set()
+ 
+    def waitKey(self, delay: int = 0) -> int:
+        # Events are processed by this thread's own waitKey() calls
+        return -1
+ 
+    def setWindowTitle(self, winname: str, title: str) -> None:
+        self._queue_op(('title', winname, title))
+ 
+    def destroyWindow(self, winname: str) -> None:
+        with self._lock:
+            self._frames.pop(winname, None)
+            self._ops.append(('destroy', winname))
+        self._wakeup.set()
+ 
+    def stop(self) -> None:
+        self._exit.set()
+        self._wakeup.set()
+ 
+    # ── Display loop (this thread only) ──────────────────────────────────
+ 
+    def run(self):
+        try:
+            while not self._exit.is_set():
+                self._wakeup.wait(self.period_s)
+                self._wakeup.clear()
+ 
+                with self._lock:
+                    ops = list(self._ops)
+                    self._ops.clear()
+                    frames, self._frames = self._frames, {}
+ 
+                for op in ops:
+                    self._apply(op)
+ 
+                for winname, mat in frames.items():
+                    if winname in self._open:    # ignore images for closed windows
+                        cv2.imshow(winname, mat)
+ 
+                cv2.waitKey(1)
+        finally:
+            for winname in list(self._open):
+                self._apply(('destroy', winname))
+            cv2.waitKey(1)
+ 
+    def _queue_op(self, op) -> None:
+        with self._lock:
+            self._ops.append(op)
+        self._wakeup.set()
+ 
+    def _apply(self, op) -> None:
+        kind, winname = op[0], op[1]
+        try:
+            if kind == 'create' and winname not in self._open:
+                cv2.namedWindow(winname, op[2])
+                self._place(winname)
+                self._open.append(winname)
+ 
+            elif kind == 'title' and winname in self._open:
+                cv2.setWindowTitle(winname, op[2])
+ 
+            elif kind == 'destroy' and winname in self._open:
+                cv2.destroyWindow(winname)
+                self._open.remove(winname)
+ 
+        except cv2.error as e:
+            print(f"[{self.name}] {kind} '{winname}' failed: {e}")
+ 
+    def _place(self, winname: str) -> None:
+        if self.window_size is None:
+            return
+        w, h = self.window_size
+        i = self._n_created
+        self._n_created += 1
+        x = self.origin[0] + (i % self.columns) * (w + self.spacing[0])
+        y = self.origin[1] + (i // self.columns) * (h + self.spacing[1])
+        cv2.resizeWindow(winname, w, h)
+        cv2.moveWindow(winname, x, y)
+ 
+ 
 class Imshow(RThread_R1):
     """
     Class for plotting frames and possibly bounding boxes in a thread.
+ 
+    display : ImshowDisplay, optional
+        If given, all window operations are carried out by that thread
+        (required on Linux when several Imshow threads run at once). If
+        None, this thread calls cv2 directly (as before).
     """
-    
+ 
     def __init__(self,
                  name :str,
                  read_buffer:Queue,
                  ArrayType:int = None,
                  SensorType:int = None,
+                 display: Optional[ImshowDisplay] = None,           # CHANGED
+                 plot_ptat: bool = False,                           # ADDED
+                 plot_window_s: Optional[float] = None,             # ADDED
                  **kwargs):
-        
+ 
         if ArrayType is None and SensorType is not None:
             self.tparray = TPArray(SensorType = SensorType)
         elif ArrayType is not None and SensorType is None:
             self.tparray = TPArray(ArrayType = ArrayType)
         else:
             raise Exception('Either ArrayType or SensorType must be provided.')
-            
+ 
         self.num_pix = len(self.tparray._pix)
-        
+ 
         self.window_name = kwargs.pop('window_name','Sensor stream')
-        
+ 
+        # Window operations go to the display thread, or directly to cv2   # CHANGED
+        self._gui = cv2 if display is None else display                    # CHANGED
+ 
+        # Line plot of data['ptat_avg'] below the image                    # ADDED
+        self.plot_ptat = plot_ptat                                         # ADDED
+        self.ptat_plot = TimeSeriesPlot(title='PTAT avg', unit='digits',   # ADDED
+                                        window_s=plot_window_s)            # ADDED
+        self._t_first = None                                               # ADDED
+ 
         # Set time
         self.t0 = time.time()
-        
+ 
         # Call parent class
         super().__init__(name = name,
                          read_buffer = read_buffer,
                          **kwargs)
-    
+ 
     def _target(self):
-        
-        # print('Executed imshow thread: ' + str(time.time()-self.t0) )
-        
+
         # Get result from upstream thread
-        data = self.read_buffer.get()
-        
-        print(f"Received frame at {data['t']}")
-        
+        data = self._get()
+
         # Check success flag of upstream thread
         if data['success'] == True:
-            
-                    
-                
-            frame = data['pix_dK']
-    
+
+            # 'frame' is what every *_Client writes; 'pix_dK' / 'pix' are
+            # the per-driver keys the I2C/SPI clients still use
+            if 'frame' in data.keys():
+                frame = data['frame']
+            elif 'pix_dK' in data.keys():
+                frame = data['pix_dK']
+            else:
+                frame = data['pix']
+ 
             # Reshape if not the proper size
             if frame.ndim == 1:
                 frame = frame[0:self.num_pix]
                 frame = frame.reshape(self.tparray._npsize)
-                 
+ 
             # convert to opencv type
             frame = cv2.normalize(frame,frame,0,255,cv2.NORM_MINMAX)
             frame = frame.astype(np.uint8)
-            
+ 
             # Save to dict
-            data['frame_plot'] = frame 
-            
+            data['frame_plot'] = frame
+ 
             # Write annotations to dict
-            annotations = data['annot_frame'].annotations
-            annotations['confirmed'] = False
-            annotations.loc[annotations['label']==1,'confirmed'] = True
-            data['bboxes'] = annotations
-
-            
+            if 'annot_frame' in data.keys():
+                annotations = data['annot_frame'].annotations
+                annotations['confirmed'] = False
+                annotations.loc[annotations['label']==1,'confirmed'] = True
+                data['bboxes'] = annotations
+ 
         else:
             # If upstream thread failed, set success flag to False
             data['success'] = False
-
-            
+ 
         return data
-    
+
+    def _on_idle(self):
+        """Called while no frame arrives (see run()). Keeps the window
+        responsive, so it still redraws and reacts to the window manager
+        while the stream has not started yet or the device is gone."""
+        try:
+            self._gui.waitKey(1)
+        except cv2.error:
+            pass
+
     def run(self):
-        
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        
+
+        self._gui.namedWindow(self.window_name, cv2.WINDOW_NORMAL)        # CHANGED
+
         # Check if thread has been stopped
         while not self._exit.is_set():
-            
-            # Execute target function
-            data = self._target()
-            
+
+            try:
+                # Execute target function
+                data = self._target()
+
+            except queue.Empty:
+                # No frame within get_timeout. Keep the window responsive
+                # and go back to the top of the loop, where the exit flag
+                # is checked. Without this the thread waits in
+                # read_buffer.get() for a frame that never comes once the
+                # producer upstream has ended -- stop() is then ignored,
+                # join() hangs and the window is never destroyed, which is
+                # why callers used to push a dummy item into the buffer
+                # just to get this loop moving again.
+                self._on_idle()
+                continue
+
             # Check success flag of upstream thread
             if data['success'] is True:
-                
+ 
                 # Get frame (processed)
                 frame = data['frame_plot']
-                
-                # Scale it up by a factor of 5
+ 
+                # Scale it up by a factor of 10
                 sf = 10
-                # frame = cv2.resize(frame, (0,0), fx=sf, fy=sf) 
                 frame = np.repeat(np.repeat(frame, sf, axis=0), sf, axis=1)
-                
-                # Convert frame to RGB to be able to plot colored 
+ 
+                # Convert frame to RGB to be able to plot colored
                 # boxes
                 frame = cv2.cvtColor(frame,cv2.COLOR_GRAY2RGB)
-                
+ 
                 # Get bboxes if available
                 if 'bboxes' in data.keys():
                     bboxes = data['bboxes']
-                    
+ 
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     fontScale              = 0.4
                     fontColor              = (255,255,0)
                     thickness              = 1
                     lineType               = 2
-                                   
+ 
                     # Draw bounding boxes
                     for b in bboxes.index:
-                                                    
+ 
                         box = bboxes.loc[[b]]
-                    
+ 
                         if box['confirmed'].item() != True:
                             continue
-                        
+ 
                         x,y = int(box['xtl'].item()),int(box['ytl'].item()),
                         w = int(box['xbr'].item()) - int(box['xtl'].item())
                         h = int(box['ybr'].item()) - int(box['ytl'].item())
-                        
+ 
                         # Scale coordinates
                         x = int(sf*x); y = int(sf*y); w = int(sf*w); h = int(sf*h)
-                        
+ 
                         frame = cv2.rectangle(frame,
                                               (x,y),
                                               (x+w,y+h),
                                               (255,255,0),1)
-                        
+ 
                         # Write score if it exists
                         if box['score'].item() != -99:
                             font = cv2.FONT_HERSHEY_SIMPLEX
@@ -511,49 +1049,306 @@ class Imshow(RThread_R1):
                             fontColor              = (255,255,0)
                             thickness              = 1
                             lineType               = 2
-                            
-                            score = f'{box['score'].item():.2}'
-                            
+ 
+                            score = f"{box['score'].item():.2}"
+ 
                             cv2.putText(frame,
-                                        score, 
-                                        blxy, 
-                                        font, 
+                                        score,
+                                        blxy,
+                                        font,
                                         fontScale,
                                         fontColor,
                                         thickness,
                                         lineType)
-                            
+ 
                     # Write the number of persons in the upper left corner
                     num_persons = sum(bboxes['confirmed'] == True)
-                    
+ 
                     cv2.putText(frame,
-                                f'Number of persons: {num_persons}', 
-                                (0,20), 
-                                font, 
+                                f'Number of persons: {num_persons}',
+                                (0,20),
+                                font,
                                 fontScale,
                                 fontColor,
                                 thickness,
                                 lineType)
-
-                        
-                cv2.imshow(self.window_name,frame)
-                cv2.waitKey(1)
-            
+ 
+                # PTAT plot below the image                                # ADDED
+                if self.plot_ptat:                                         # ADDED
+                    frame = self._add_ptat_plot(frame, data)               # ADDED
+ 
+                self._gui.imshow(self.window_name,frame)                   # CHANGED
+                self._gui.waitKey(1)                                       # CHANGED
+ 
             else:
                 print('else')
                 pass
-
+ 
             # Signal that processing on this item in the read_buffer is done
             # self.read_buffer.task_done()
-
+ 
         # The opencv window needs to be closed inside the run function,
         # otherwise a window with the same name can never be opened until
         # the console is restarted
-        if self._exit == True:
-            cv2.destroyWindow(self.window_name)
-            
+        if self._exit.is_set():
+            self._gui.destroyWindow(self.window_name)                      # CHANGED
+ 
+    def _add_ptat_plot(self, frame, data):                                 # ADDED
+        """Append data['ptat_avg'] to the history and stack the plot
+        below the image. The plot is a third of the image's height."""
+        if 'ptat_avg' in data:
+            t = data['t'].timestamp() if hasattr(data.get('t'), 'timestamp') else time.time()
+            if self._t_first is None:
+                self._t_first = t
+            self.ptat_plot.add(t - self._t_first, data['ptat_avg'])
+        panel = self.ptat_plot.render(frame.shape[1], frame.shape[0] // 3)
+        return np.vstack([frame, panel])
+ 
     def stop(self):
-        self._exit = True
+        self._exit.set()
+
+_REC_SUFFIX = '.pkl'
+_PART_SUFFIX = '.part'
+_REC_FORMAT_VERSION = 1
+ 
+ 
+class ImshowRecorder(Imshow):
+    """
+    Imshow thread with recording. Displays every frame exactly like Imshow;
+    between start_recording() and stop_recording() every successfully
+    received frame dict is also kept, and written to a pickle file in the
+    background once recording stops.
+ 
+    start_recording() / stop_recording() are the "commands": call them from
+    any thread (e.g. the main thread reacting to user input).
+    """
+ 
+    def __init__(self,
+                 name: str,
+                 read_buffer,
+                 ArrayType: int = None,
+                 SensorType: int = None,
+                 record_dir: Union[str, Path] = '.',
+                 record_keys: Optional[Sequence[str]] = None,
+                 exclude_keys: Sequence[str] = ('frame_plot',),
+                 save_on_stop: bool = True,
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        name, read_buffer, ArrayType, SensorType, **kwargs :
+            As for Imshow (e.g. window_name=..., display=...). Pass a shared
+            ImshowDisplay as display= whenever several ImshowRecorder /
+            Imshow threads run at once (required on Linux).
+        record_dir : str or Path
+            Directory recordings are written to when start_recording() is
+            called without a file path. Created if it does not exist.
+        record_keys : sequence of str, optional
+            Keys of the frame dict to record. None (default) records all
+            keys except exclude_keys.
+        exclude_keys : sequence of str
+            Keys never recorded. Default: 'frame_plot' (the normalised
+            uint8 display image, which can be recomputed from the data).
+        save_on_stop : bool
+            If True (default) and a recording is still running when the
+            thread is stopped, it is stopped and written to file.
+        """
+ 
+        super().__init__(name=name,
+                         read_buffer=read_buffer,
+                         ArrayType=ArrayType,
+                         SensorType=SensorType,
+                         **kwargs)
+ 
+        self.record_dir = Path(record_dir)
+        self.record_keys = None if record_keys is None else tuple(record_keys)
+        self.exclude_keys = frozenset(exclude_keys)
+        self.save_on_stop = save_on_stop
+ 
+        # Recording state, shared between the display thread (_target) and
+        # the thread calling start/stop_recording -> guarded by a lock
+        self._rec_lock = threading.Lock()
+        self._rec_active = False
+        self._rec_frames: List[dict] = []
+        self._rec_path: Optional[Path] = None
+        self._rec_t_start: Optional[datetime] = None
+ 
+        # Writer threads that have been started (one per recording)
+        self._rec_writers: List[threading.Thread] = []
+ 
+        # Window-title state, only touched by the display thread
+        self._rec_title_shown = False
+ 
+    # ── Commands ─────────────────────────────────────────────────────────
+ 
+    @property
+    def is_recording(self) -> bool:
+        return self._rec_active
+ 
+    @property
+    def n_recorded(self) -> int:
+        """Number of frames recorded so far in the current recording."""
+        return len(self._rec_frames)
+ 
+    def start_recording(self, file_path: Union[str, Path, None] = None) -> Path:
+        """
+        Start recording. Returns the path the recording will be written to.
+ 
+        file_path : target file. Default:
+                    <record_dir>/<thread name>_<YYYYmmdd_HHMMSS>.pkl
+        """
+        t_start = datetime.now()
+ 
+        if file_path is None:
+            stamp = t_start.strftime('%Y%m%d_%H%M%S')
+            file_path = self.record_dir / f'{self.name}_{stamp}{_REC_SUFFIX}'
+        file_path = Path(file_path)
+ 
+        with self._rec_lock:
+            if self._rec_active:
+                raise RuntimeError(f"[{self.name}] Already recording to {self._rec_path}")
+            self._rec_frames = []
+            self._rec_path = file_path
+            self._rec_t_start = t_start
+            self._rec_active = True
+ 
+        print(f"[{self.name}] Recording started -> {file_path}")
+        return file_path
+ 
+    def stop_recording(self) -> Optional[Path]:
+        """
+        Stop recording and write the recorded frames to file in a background
+        thread. Returns immediately with the path the file is being written
+        to, or None if no recording was running.
+ 
+        Use wait_until_saved() to wait for the file to be complete.
+        """
+        t_stop = datetime.now()
+ 
+        with self._rec_lock:
+            if not self._rec_active:
+                return None
+            self._rec_active = False
+            frames, self._rec_frames = self._rec_frames, []
+            path = self._rec_path
+            t_start = self._rec_t_start
+ 
+        meta = {'format_version': _REC_FORMAT_VERSION,
+                'source': self.name,
+                'window_name': self.window_name,
+                'tparray_npsize': getattr(self.tparray, '_npsize', None),
+                't_start': t_start,
+                't_stop': t_stop,
+                'n_frames': len(frames)}
+ 
+        print(f"[{self.name}] Recording stopped: {len(frames)} frames, writing {path} ...")
+ 
+        # Non-daemon: the interpreter waits for the file to be complete
+        # even if the main thread ends first
+        writer = threading.Thread(target=self._write_recording,
+                                  args=(path, meta, frames),
+                                  name=f'{self.name}_writer',
+                                  daemon=False)
+        self._rec_writers.append(writer)
+        writer.start()
+        return path
+ 
+    def wait_until_saved(self, timeout: Optional[float] = None) -> bool:
+        """
+        Wait until all recordings started so far are written. Returns True
+        if all writers have finished.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for writer in list(self._rec_writers):
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            writer.join(remaining)
+        self._rec_writers = [w for w in self._rec_writers if w.is_alive()]
+        return not self._rec_writers
+ 
+    def stop(self):
+        # Save a running recording when the thread is stopped
+        if self.save_on_stop and self._rec_active:
+            self.stop_recording()
+        super().stop()
+ 
+    # ── Display loop hook ────────────────────────────────────────────────
+ 
+    def _target(self):
+ 
+        # Get + preprocess the frame exactly like Imshow
+        data = super()._target()
+ 
+        # Keep it if recording. Only a shallow copy of the dict is stored:
+        # the arrays are referenced, not copied (each frame from the
+        # upstream thread comes with its own arrays).
+        if self._rec_active and data.get('success') is True:
+            entry = self._select_keys(data)
+            with self._rec_lock:
+                if self._rec_active:            # may have stopped meanwhile
+                    self._rec_frames.append(entry)
+ 
+        # Show the recording state in the window title. Goes through
+        # self._gui like all window operations of Imshow: directly to cv2
+        # (this thread owns the window) or to the ImshowDisplay thread.
+        if self._rec_active != self._rec_title_shown:
+            self._rec_title_shown = self._rec_active
+            title = f'{self.window_name}  [REC]' if self._rec_active else self.window_name
+            try:
+                self._gui.setWindowTitle(self.window_name, title)
+            except cv2.error:
+                pass
+ 
+        return data
+ 
+    # ── Helpers ──────────────────────────────────────────────────────────
+ 
+    def _select_keys(self, data: dict) -> dict:
+        if self.record_keys is not None:
+            return {k: data[k] for k in self.record_keys if k in data}
+        return {k: v for k, v in data.items() if k not in self.exclude_keys}
+ 
+    def _write_recording(self, path: Path, meta: dict, frames: List[dict]) -> None:
+        """Runs in the writer thread."""
+        part = path.with_name(path.name + _PART_SUFFIX)
+        t0 = time.perf_counter()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(part, 'wb') as f:
+                pkl.dump(meta, f, protocol=pkl.HIGHEST_PROTOCOL)
+                for frame in frames:
+                    pkl.dump(frame, f, protocol=pkl.HIGHEST_PROTOCOL)
+                    time.sleep(0)         # yield the GIL to the display thread
+            part.replace(path)            # complete -> final name
+            print(f"[{self.name}] Saved {meta['n_frames']} frames to {path} "
+                  f"({path.stat().st_size / 1e6:.1f} MB, "
+                  f"{time.perf_counter() - t0:.1f} s)")
+        except Exception as e:
+            print(f"[{self.name}] Writing {path} failed: {e}")
+            try:
+                part.unlink()
+            except OSError:
+                pass
+ 
+ 
+def load_recording(path: Union[str, Path]) -> Tuple[dict, List[dict]]:
+    """
+    Load a recording written by ImshowRecorder.
+ 
+    Returns
+    -------
+    (meta, frames)
+        meta   : dict with source, window_name, t_start, t_stop, n_frames, ...
+        frames : list of the recorded frame dicts, in recording order
+    """
+    frames = []
+    with open(path, 'rb') as f:
+        meta = pkl.load(f)
+        while True:
+            try:
+                frames.append(pkl.load(f))
+            except EOFError:
+                break
+    return meta, frames
 
 
 class DummyConsumer(RThread_R1):
@@ -568,7 +1363,7 @@ class DummyConsumer(RThread_R1):
                          **kwargs)
     
     def _target(self):
-        _ = self.read_buffer.get()
+        _ = self._get()
         print('Frame obtained!')
         return None
 
@@ -635,8 +1430,8 @@ class DataRecord(RThread_R1):
         """
         
         # Get result from upstream thread
-        data = self.read_buffer.get()
-        
+        data = self._get()
+
         # Acquire timestamp from data, if existing
         if 't' in data.keys():
             timestamp = data['t']
@@ -958,8 +1753,8 @@ class EMACounting_Thread(RThread_R1):
         # ---------------------------------------------------------------------
         # Acquire data from read buffer
         # ---------------------------------------------------------------------
-        result = self.read_buffer.get()
-        
+        result = self._get()
+
         # Try to obtain number of confirmed detections
         if result['success'] == True:
             if 'bboxes' in result.keys():
@@ -1021,7 +1816,7 @@ class FileWriter_Thread(RThread):
     def run(self):
         
         # Check if thread has been stopped
-        while self._exit == False:
+        while not self._exit.is_set():
             
             # Acquire the read condition
             with self.read_condition:
