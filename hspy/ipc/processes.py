@@ -1237,7 +1237,6 @@ class ImshowProcess(RProcess_R1):
                                 fontScale, fontColor, thickness, lineType)
                     
                 # Write class scores if they exist
-                print(box.columns)
                 try:
                     c_score = box['class_2'].item()
                     c_tresh = 0.1
