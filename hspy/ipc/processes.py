@@ -1141,9 +1141,11 @@ class ImshowProcess(RProcess_R1):
             frame = data['pix']
             
         
-        if 'inference' in data.keys():
-            if data['inference']['BackgroundSub']['frame'] is not None:
-                frame = data['inference']['ShrinkCenter']['frame']
+        # if 'inference' in data.keys():
+        #     if data['inference']['PreprocEngAWA']['frame'] is not None:
+        #         frame = data['inference']['PreprocEngAWA']['frame']
+        #     if data['inference']['BackgroundSub']['frame'] is not None:
+        #         frame = data['inference']['ShrinkCenter']['frame']
                 # pkl.dump(frame_db,open('frame_awa_db.pkl','wb'))
 
                 # From BackgroundSub on, the pipeline's frame may carry two
