@@ -1238,7 +1238,7 @@ class ImshowProcess(RProcess_R1):
                     
                 # Write class scores if they exist
                 print(box.columns)
-                if 'class_2' in box.columns:
+                try:
                     c_score = box['class_2'].item()
                     c_tresh = 0.1
                     if c_score - c_tresh > 0:
@@ -1247,7 +1247,8 @@ class ImshowProcess(RProcess_R1):
                         c_label = 'upright'
                     
                     c_text = f"pose: {c_label}, score: {c_score - c_tresh:.2}"
-                    
+                except:
+                    pass
                 # class_cols = [c for c in box.columns if 'class' in c]
                 # v_off = 0 # vertical offset for multiple class scores
                 # for c in class_cols:
