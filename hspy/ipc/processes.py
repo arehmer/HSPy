@@ -1107,6 +1107,13 @@ class ImshowProcess(RProcess_R1):
         # Get result from upstream process
         data = self._get()
         
+        # # db
+        # try:
+        #     print(data['inference']['BoxPoseClassifier'])
+        # except:
+        #     pass
+        # # \db
+        
         # # Store data    
         # rec_path = Path.cwd() / 'rec' # db
         # rec_path.mkdir(exist_ok= True, parents=True) # db
@@ -1147,6 +1154,7 @@ class ImshowProcess(RProcess_R1):
                 # strided, which the cv2 calls below reject.
                 if frame is not None and frame.ndim == 3:
                     frame = np.ascontiguousarray(frame[..., 0])
+                    
         # print('db2')
         # Reshape if not the proper size
         if frame.ndim == 1:
@@ -1169,14 +1177,23 @@ class ImshowProcess(RProcess_R1):
         # Find annotations in passed data
         annot_exist = False
         if 'inference' in data.keys():
-            if 'YOLO_EnDecode_Engine' in data['inference'].keys():
+            
+            if 'BoxPoseClassifier' in data['inference'].keys():
+                bboxes = data['inference']['BoxPoseClassifier']
+                bboxes.rename(columns={'conf':'score'}, inplace=True)
+                bboxes['confirmed'] = True
+                bboxes.replace({'pose_label':0},'upright', inplace=True)
+                bboxes.replace({'pose_label':1},'lying', inplace=True)
+                
+                annot_exist = True
+            
+            elif 'YOLO_EnDecode_Engine' in data['inference'].keys():
                 bboxes = data['inference']['YOLO_EnDecode_Engine']
                 bboxes.rename(columns={'conf':'score'}, inplace=True)
                 bboxes['confirmed'] = True
                 annot_exist = True
-        print(bboxes)      
-        # print('db5')
-        
+                
+       
         # Draw bounding boxes / annotations, if present
         if 'annot_frame' in data.keys():
 
@@ -1218,6 +1235,22 @@ class ImshowProcess(RProcess_R1):
                     score = f"{box['score'].item():.2}"
                     cv2.putText(frame, score, (x + 1, y + 10), font,
                                 fontScale, fontColor, thickness, lineType)
+                    
+                # Write class scores if they exist
+                class_cols = [c for c in box.columns if 'class' in c]
+                v_off = 0 # vertical offset for multiple class scores
+                for c in class_cols:
+                    c_score = f"{c}: {box[c].item():.2}"
+                    cv2.putText(frame, c_score, (x + w + 1, y + v_off + 10), font,
+                                fontScale, fontColor, thickness, lineType)
+                    v_off += 15
+                    
+                if 'pose_label' in box.columns:
+                    p_label = f"pose: {box['pose_label'].item()}, score: {box['pose_score'].item():.2} "
+                    cv2.putText(frame, p_label, (x + w + 1, y + h + v_off + 10), font,
+                                fontScale, fontColor, thickness, lineType)
+                    
+                    
                 # print('db5')
             # # Write the number of persons in the upper left corner
             # num_persons = sum(bboxes['confirmed'] == True)
