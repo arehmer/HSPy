@@ -1246,6 +1246,8 @@ class ImshowProcess(RProcess_R1):
                         c_label = 'upright'
                     
                     c_text = f"pose: {c_label}, score: {c_score - c_tresh:.2}"
+                    cv2.putText(frame, c_text, (x + w + 1, y + 10), font,
+                                fontScale, fontColor, thickness, lineType)
                 except:
                     pass
                 # class_cols = [c for c in box.columns if 'class' in c]
