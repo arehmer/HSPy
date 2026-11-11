@@ -1237,13 +1237,23 @@ class ImshowProcess(RProcess_R1):
                                 fontScale, fontColor, thickness, lineType)
                     
                 # Write class scores if they exist
-                class_cols = [c for c in box.columns if 'class' in c]
-                v_off = 0 # vertical offset for multiple class scores
-                for c in class_cols:
-                    c_score = f"{c}: {box[c].item():.2}"
-                    cv2.putText(frame, c_score, (x + w + 1, y + v_off + 10), font,
-                                fontScale, fontColor, thickness, lineType)
-                    v_off += 15
+                if 'class_2' in box.columns:
+                    c_score = box['class_2'].item()
+                    c_tresh = 0.1
+                    if c_score - c_tresh > 0.1:
+                        c_label = 'lying'
+                    else:
+                        c_label = 'upright'
+                    
+                    c_text = f"pose: {c_label}, score: {c_score - c_tresh:.2}"
+                    
+                # class_cols = [c for c in box.columns if 'class' in c]
+                # v_off = 0 # vertical offset for multiple class scores
+                # for c in class_cols:
+                #     c_score = f"{c}: {box[c].item():.2}"
+                #     cv2.putText(frame, c_score, (x + w + 1, y + v_off + 10), font,
+                #                 fontScale, fontColor, thickness, lineType)
+                #     v_off += 15
                     
                 if 'pose_label' in box.columns:
                     p_label = f"pose: {box['pose_label'].item()}, score: {box['pose_score'].item():.2} "
