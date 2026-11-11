@@ -1237,10 +1237,11 @@ class ImshowProcess(RProcess_R1):
                                 fontScale, fontColor, thickness, lineType)
                     
                 # Write class scores if they exist
+                print(box.columns)
                 if 'class_2' in box.columns:
                     c_score = box['class_2'].item()
                     c_tresh = 0.1
-                    if c_score - c_tresh > 0.1:
+                    if c_score - c_tresh > 0:
                         c_label = 'lying'
                     else:
                         c_label = 'upright'
