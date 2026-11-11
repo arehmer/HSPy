@@ -1146,23 +1146,23 @@ class ImshowProcess(RProcess_R1):
         #         frame = data['inference']['PreprocEngAWA']['frame']
         #     if data['inference']['BackgroundSub']['frame'] is not None:
         #         frame = data['inference']['ShrinkCenter']['frame']
-                # pkl.dump(frame_db,open('frame_awa_db.pkl','wb'))
+        #         pkl.dump(frame_db,open('frame_awa_db.pkl','wb'))
 
-                # From BackgroundSub on, the pipeline's frame may carry two
-                # channels (0: background-subtracted, 1: the frame that entered
-                # the subtraction). Display the background-subtracted one --
-                # cvtColor(GRAY2RGB) below needs a single-channel image.
-                # ascontiguousarray because frame[...,0] of an (H,W,2) array is
-                # strided, which the cv2 calls below reject.
-                if frame is not None and frame.ndim == 3:
-                    frame = np.ascontiguousarray(frame[..., 0])
-                    
-        # print('db2')
+        #         # From BackgroundSub on, the pipeline's frame may carry two
+        #         # channels (0: background-subtracted, 1: the frame that entered
+        #         # the subtraction). Display the background-subtracted one --
+        #         # cvtColor(GRAY2RGB) below needs a single-channel image.
+        #         # ascontiguousarray because frame[...,0] of an (H,W,2) array is
+        #         # strided, which the cv2 calls below reject.
+        #         if frame is not None and frame.ndim == 3:
+        #             frame = np.ascontiguousarray(frame[..., 0])
+
+        
         # Reshape if not the proper size
         if frame.ndim == 1:
             frame = frame[0:self.num_pix]
             frame = frame.reshape(self.tparray._npsize)
-        # print('db3')
+            
         # print(f'frame.shape: {frame.shape}')
         # Convert to opencv type
         frame = cv2.normalize(frame, frame, 0, 255, cv2.NORM_MINMAX)
@@ -1175,7 +1175,6 @@ class ImshowProcess(RProcess_R1):
         # Convert frame to RGB to be able to plot colored boxes
         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
         
-        # print('db4')
         # Find annotations in passed data
         annot_exist = False
         if 'inference' in data.keys():
