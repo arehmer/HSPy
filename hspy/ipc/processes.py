@@ -1257,7 +1257,7 @@ class ImshowProcess(RProcess_R1):
                     
                 if 'pose_label' in box.columns:
                     p_label = f"pose: {box['pose_label'].item()}, score: {box['pose_score'].item():.2} "
-                    cv2.putText(frame, p_label, (x + w + 1, y + h + v_off + 10), font,
+                    cv2.putText(frame, p_label, (x + w + 1, y + h + 10), font,
                                 fontScale, fontColor, thickness, lineType)
                     
                     
