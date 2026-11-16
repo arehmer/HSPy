@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "HSPy"
+version = "1.0.0"
+description = "Python Interface for Heimann Sensor Thermopile Arrays."
+readme = "README.md"            # uncomment if the repo has a README
+requires-python = ">=3.10"
+authors = [
+    { name = "Alexander Rehmer", email = "rehmer@heimannsensor.com" },
+]
+dependencies = [
+    "pandas>=2.2.2",
+    "smbus2",
+    "matplotlib",
+    "numpy>=2.0",
+    "scipy>=1.13.1",
+    "scikit-learn",
+    "openpyxl",
+    "mcap",
+    "tables",
+    "h5py",
+    "opencv-python",
+    "pyusb",
+    "libusb-package",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+# Replaces find_packages(): only pick up the hspy package and its subpackages,
+# so folders like config/ are never treated as packages.
+[tool.setuptools.packages.find]
+include = ["hspy*"]
+
+# Replaces package_data; include_package_data is already on by default here.
+[tool.setuptools.package-data]
+"hspy.arraytypes" = ["*.json"]

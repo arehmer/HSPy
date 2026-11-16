@@ -1,0 +1,95 @@
+Metadata-Version: 2.4
+Name: HSPy
+Version: 1.0.0
+Summary: Python Interface for Heimann Sensor Thermopile Arrays.
+Author-email: Alexander Rehmer <rehmer@heimannsensor.com>
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: pandas>=2.2.2
+Requires-Dist: smbus2
+Requires-Dist: matplotlib
+Requires-Dist: numpy>=2.0
+Requires-Dist: scipy>=1.13.1
+Requires-Dist: scikit-learn
+Requires-Dist: openpyxl
+Requires-Dist: mcap
+Requires-Dist: tables
+Requires-Dist: h5py
+Requires-Dist: opencv-python
+Requires-Dist: pyusb
+Requires-Dist: libusb-package
+
+<picture align="center">
+  <img alt="HSPy Logo)" src="images/HSPyLogo.png">
+</picture>
+
+-----------------
+
+# HSPy: Python Integration for Heimann Sensor Thermopiles
+HSPy is a Python library that provides customers with a seamless way to integrate Heimann Sensor hardware and software into their Python applications. It offers a range of tools for:
+Live streaming, recording, and visualization of sensor data from our Appsets
+Converting sensor data recorded with ArraySoft into NumPy arrays or pandas DataFrames for further analysis
+With HSPyTools, developers can easily access, process, and analyze data from our systems directly within their Python workflows.
+
+# Installation
+
+The library was developed using the Anaconda3 distribution of Python 3.11.5. In the following instructions for the installation via conda as well as pip are provided.
+
+## Prerequisites
+- A working Pyhon installation <= 3.13.12  ([Download Python](https://www.python.org/downloads/release/python-31312/))
+- A working GitHub installation. ([Download GitHub Desktop](https://desktop.github.com/download/))
+- [ArraySoft v2.30](https://cdn.website-editor.net/s/156d2965ff764637aaea150903bb0161/files/uploaded/SetupHTPAdGUIv2_30.rar?Expires=1709501376&Signature=p8nizQ9W1PC3O4uuuEpsxpqhTZc3t1vdlI1HImzhGcxrSur-9jmvYcf7EvJvU223HmZKhFJvr4dYW8PYtFwv1RVGjh626sN0ZQRICL6MBwOhqmevGODlUCFYjuGCMGWwlJCMpVz68dIYcBKjBS7MhEGKL~wCf1atkW82yr6eewPK3AJQmV0StLWQCi7Z4Q8epYWjGt4Xmuaa7wAcQJfFCBK1IKutkl52FPint4CqYarqQKfqpKJMn13SlVQSdp-RZbKZirddGrQkzTpYfi2BOuxThTn6C-FfXGQLC~Hnt1858gv96EKq23VJEGDmV~97rhQmj2YzXGySGpMnVv5xJQ__&Key-Pair-Id=K2NXBXLF010TJW) (if .bds or .txt files are to be parsed to pandas)
+
+## Optional: Create a virtual environment
+  A virtual environment is created on top of an existing Python installation, known as the virtual environment’s 'base'”' Python, and may optionally be isolated from the packages in the base environment, so only those explicitly installed in the virtual environment are available.
+  A virtual environment is used to contain a specific Python interpreter and software libraries and binaries which are needed to support a project.
+
+  A virtual environment can be created using `venv`. For example
+
+  ```sh
+  python -m venv /path/to/new/virtual/environment/hs
+  ```
+
+  will create a virtual environment called `hs` in the specified path. The environment can be activated by typing
+
+  ```sh
+    ./path/to/new/virtual/environment/hs/Scripts/activate
+  ```
+
+## Download HSPyTools
+1. Clone this repository either via using the shell
+
+ ```sh
+ git clone https://github.com/arehmer/HSPyTools.git
+  ```
+
+   or using the GitHub Desktop-App: ```File-->Clone repository ``` <br>
+   <img src="images/screenshot1_github_desktop.png"  height="300">
+
+   and then enter the URL ```https://github.com/arehmer/HSPyTools.git``` into the mask <br>
+   <img src="images/screenshot2_github_desktop.png" height="200">
+
+## Install HSPyTools
+1. Open a Shell.
+2. Optional: Activate the environment in which HSPyTools is to be installed via
+    ```sh
+    source /path/to/virtual/environment/Scripts/activate
+    ```
+4. Install HSFit in development mode with pip via
+    ```sh
+    pip install -e \path\to\HSPyTools>
+    ```
+    The installation in devlopment mode makes sure, that changes to the repository are automatically reflected in the installed library. Therefore no new installation is necessary after pulling new commits.
+
+## Check installation
+1. In the shell start the python interpreter via
+
+   ```sh
+   python
+   ```
+2. Then try to import HSPyTools by typing
+
+   ```sh
+   import hspytools
+   ```
+   If no error message occurs, installation was successful.
