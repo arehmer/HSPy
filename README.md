@@ -42,7 +42,7 @@ uv --version
 ```
 
 ## Download HSPy
-1. Clone this repository e.g. via the shell
+1. Clone this repository e.g. via
 
    ```sh
    git clone https://github.com/arehmer/HSPy.git
