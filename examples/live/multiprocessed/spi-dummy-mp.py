@@ -86,7 +86,7 @@ if __name__ == '__main__':
                     break
 
     dummy_consumer = RProcess_R1(name='dummy_process',
-                                read_buffer=i2c_buffer,
+                                read_buffer=spi_buffer,
                                 ArrayType=10)
 
     print('Starting processes...')
@@ -110,6 +110,6 @@ if __name__ == '__main__':
         dummy_consumer.join()
 
         # Release the shared memory backing the buffers
-        i2c_buffer.close()
+        spi_buffer.close()
 
         print("All processes stopped.")
