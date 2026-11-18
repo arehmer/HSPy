@@ -77,13 +77,8 @@ if __name__ == '__main__':
                              ArrayType=ArrayType)
 
         def _target(self):
-            while not self._stop_event.is_set():
-                try:
-                    data = self.read_buffer.get(timeout=0.5)
-                    print(f"Dummy process received data of length {len(data)}")
-                except Exception as e:
-                    print(f"Dummy process encountered an error: {e}")
-                    break
+            data = self._get()
+            print('Received data from SPI process: ', data.keys())
 
     dummy_consumer = RProcess_R1(name='dummy_process',
                                 read_buffer=spi_buffer)
