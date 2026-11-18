@@ -86,8 +86,7 @@ if __name__ == '__main__':
                     break
 
     dummy_consumer = RProcess_R1(name='dummy_process',
-                                read_buffer=spi_buffer,
-                                ArrayType=10)
+                                read_buffer=spi_buffer)
 
     print('Starting processes...')
     spi_process.start()
