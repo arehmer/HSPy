@@ -33,7 +33,7 @@ arg_parser.add_argument("--bus",
                         dest = "bus",
                         type=int,
                         required=True,
-                        help="I2C bus that HTPA device is connected to.")
+                        help="SPI bus that HTPA device is connected to.")
 
 
 # %% Parse arguments
@@ -60,20 +60,13 @@ if __name__ == '__main__':
     #%% Create shared-memory-backed buffers for communication between
     # processes (replaces the plain queue.Queue buffers used between
     # threads)
-    i2c_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=4 * 1024 * 1024)
+    spi_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=4 * 1024 * 1024)
 
-    #%% Create I2C_ClientProcess
-    # Unlike the threading version, the I2C_HTPA32x32d driver is NOT
-    # constructed here in the parent process -- only the class and its
-    # constructor kwargs are. I2C_ClientProcess builds the actual driver
-    # (opening the SMBus handle) inside the child process, since an open
-    # file descriptor cannot be safely shared/pickled across a process
-    # boundary. LuT loading is likewise deferred: pass the CSV path and
-    # let I2C_ClientProcess load and assign it inside the child.
-    spi_process = SPI_ClientProcess(i2c_driver_cls = I2C_HTPA32x32d,
-                                    i2c_driver_kwargs = {'bus': bus},
-                                    write_buffer = i2c_buffer,
-                                    lut_csv_path = Path.cwd() / 'lut/32x32dL1k7.csv',
+    #%% Create SPI_ClientProcess
+    spi_process = SPI_ClientProcess(spi_driver_cls = SPI_HTPA160x120dR1,
+                                    spi_driver_kwargs = {},
+                                    write_buffer = spi_buffer,
+                                    lut_csv_path = None,
                                     lut_offset = 0,
                                     profile = True,
                                     profile_every= 50)

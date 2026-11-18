@@ -196,7 +196,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
     def __init__(
         self,
         bus: int = 0,
-        device: int = 0,
+        device: int = 1,
         max_speed_hz: int = _F_SPI_TYP,
         sensor_cs_high: bool = True,
         ee_enable: Optional[Callable[[bool], None]] = None,
