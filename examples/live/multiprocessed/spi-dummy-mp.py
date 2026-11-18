@@ -39,9 +39,6 @@ arg_parser.add_argument("--bus",
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
-target_ip = args.target_ip
-target_port = args.target_port
-
 
 # %% Main
 #
@@ -56,7 +53,7 @@ target_port = args.target_port
 # process would itself try to build the whole pipeline again from
 # scratch -> runaway recursive process creation.
 if __name__ == '__main__':
-
+    print('Reached main')
     #%% Create shared-memory-backed buffers for communication between
     # processes (replaces the plain queue.Queue buffers used between
     # threads)
