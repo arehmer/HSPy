@@ -38,6 +38,8 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from hspy.LuT import LuT
+from hspy.tparray import TPArray
+from hspy.drivers._frame import new_frame
 
 # ---------------------------------------------------------------------------
 # Attempt to import spidev; fall back to a stub so the module can be imported
@@ -159,6 +161,12 @@ _F_CLK_MAX       = 5.5      # MHz, max. internal clock frequency (Table 11)
 _MAX_XFER_BYTES  = 4096     # default spidev buffer size (bufsiz module param)
 _N_PTAT          = 2 * _BLOCKS  # 24 PTAT / VDD samples per frame
 
+# -- Array type -------------------------------------------------------------
+# This driver only talks to the HTPA160x120dR1, so its array type is fixed.
+# The number is the one hspy.tparray.ArrayTypes gives for it, which is what
+# the frame dict and every consumer built on TPArray expect.
+_ARRAY_TYPE = 18         # 'HTPA160x120dR1' in hspy.tparray.ArrayTypes
+
 
 class SPI_Driver:
     pass
@@ -178,9 +186,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         from hspy.drivers.spi import SPI_HTPA160x120dR1
 
-        with SPI_HTPA160x120dR1(bus=0, device=0) as sensor:
-            frame = sensor.acquire_frame(applyCalib=True, calcdK=False)
-            print(frame['Tamb'], frame['pix_comp'].reshape((120, 160)))
+        with SPI_HTPA160x120dR1(bus=0, device=0, calcdK=False) as sensor:
+            frame = sensor.acquire_frame()
+            print(frame['Tamb'], frame['frame'].reshape(frame['shape']))
     """
 
     # -- Construction / context manager --------------------------------------
@@ -194,6 +202,11 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         ee_enable: Optional[Callable[[bool], None]] = None,
         max_xfer_bytes: int = _MAX_XFER_BYTES,
         timeout_factor: float = 4.0,
+        eloff_every: int = 1,
+        applyCalib: bool = True,
+        calcdK: bool = True,
+        keep_raw: bool = False,
+        DevID: int = -1,
     ):
         """
         Parameters
@@ -214,6 +227,33 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                          spidev buffer size (``bufsiz``, 4096 by default).
         timeout_factor : End-of-conversion timeout as a multiple of the
                          estimated block conversion time.
+
+        The rest are the acquisition options acquire_frame() works by. They
+        live here, rather than being arguments of acquire_frame(), so that the
+        call in an acquisition loop is argument-free and identical for every
+        driver in hspy.drivers. They stay writable as plain attributes, so a
+        caller can still flip one between frames.
+
+        eloff_every    : How often a BLIND conversion samples fresh electrical
+                         offsets: 1 (default) means every frame, 8 means every
+                         8th frame, with the previous offsets reused in
+                         between. Section 15.3 recommends sampling them every
+                         8th to 10th frame only, which this driver now keeps
+                         track of itself -- the caller used to have to toggle
+                         the old read_eloff argument frame by frame.
+        applyCalib     : apply the flash calibration, i.e. produce
+                         frame['pix_comp']
+        calcdK         : apply the LuT, i.e. produce frame['pix_dK']. Needs
+                         applyCalib=True and self.LuT to be set.
+        keep_raw       : if True, every frame carries the raw SPI bytes and
+                         the intermediate compensation terms under
+                         frame['raw']. Off by default: they roughly double the
+                         size of a pickled frame, which matters for the
+                         fixed-size slots of a SharedMemoryQueue.
+        DevID          : optional device number, copied into every frame as
+                         frame['DevID'] so that a consumer fed by several
+                         devices can tell them apart. -1 (default) means
+                         "not set".
         """
 
         # Call constructor of parent class
@@ -234,6 +274,26 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         self._timeout_fac   = timeout_factor
         self._spi: Optional[SpiDev] = None
 
+        if int(eloff_every) < 1:
+            raise ValueError(f'eloff_every must be >= 1, got {eloff_every}.')
+
+        # Acquisition options (see the docstring above)
+        self.eloff_every = int(eloff_every)
+        self.applyCalib  = applyCalib
+        self.calcdK      = calcdK
+        self.keep_raw    = keep_raw
+        self.DevID       = DevID
+
+        # Counts frames since the last BLIND conversion, so that the driver
+        # itself decides when fresh electrical offsets are due. Starts at
+        # eloff_every so that the very first frame always reads them.
+        self._n_since_eloff = self.eloff_every
+
+        # This driver only ever talks to one kind of sensor, so the array type
+        # and the TPArray describing its data layout are fixed
+        self.ArrayType = _ARRAY_TYPE
+        self.tparray = TPArray(ArrayType=_ARRAY_TYPE)
+
         # None = unknown, True = sensor selected, False = flash selected
         self._sel_sensor: Optional[bool] = None
 
@@ -246,9 +306,8 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # Estimated end-of-conversion timeout in ms, set by init()
         self._timeout_ms: float = 100.0
 
-        # Last converted electrical offsets; reused when acquire_frame() is
-        # called with read_eloff=False (Section 15.3 recommends sampling the
-        # electrical offsets only every 8th to 10th frame).
+        # Last converted electrical offsets; reused on the frames in between
+        # two BLIND conversions (see eloff_every).
         self._eloff_last: Optional[np.ndarray] = None
 
         # Rolling stack buffers (depth 8) for stable averaging
@@ -393,53 +452,74 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         time.sleep(_T_WAKEUP_US * 1e-6)
 
     # -- Single-call frame acquisition (for use in a thread's loop body) ------
-    def acquire_frame(self,
-                      read_eloff: bool = True,   # sample the electrical offsets
-                      applyCalib: bool = True,   # apply calibration for Ud compensation
-                      calcdK: bool = True) -> dict:      # apply LuT to Ud_comp
+    def acquire_frame(self) -> dict:
         """
         Acquire and fully process one frame: reads the raw pixel data and
         electrical offsets from the sensor over SPI, then converts/rearranges
         the raw bytes and (optionally) applies calibration and the LuT.
 
+        Takes no arguments: what it does is set by the attributes
+        eloff_every, applyCalib, calcdK and keep_raw, so that this call is
+        identical for every driver in hspy.drivers and an acquisition loop
+        does not have to know which one it is driving.
+
         This bundles the whole acquisition into a single blocking call, so it
         is intended to be called once per loop iteration by an externally
-        owned thread class - analogous to how the I2C driver's
-        ``acquire_frame()`` is used.
-
-        Parameters
-        ----------
-        read_eloff : if True, trigger a BLIND conversion and read fresh
-                     electrical offsets. If False, the offsets of the previous
-                     call are reused. Section 15.3 recommends sampling them
-                     every 8th to 10th frame only.
-        applyCalib : if True, apply flash calibration (apply_calib)
-        calcdK     : if True, apply the LuT to the calibrated voltages
-                     (apply_LuT). Requires applyCalib=True and self.LuT to be set.
+        owned thread class - the same way the I2C, UDP and USB drivers are
+        used.
 
         Returns
         -------
         dict
-            Raw + converted (+ calibrated / LuT-mapped) frame data. Does
-            NOT contain a 'success' or 'image_id' key - the calling thread
-            is responsible for adding those.
+            The frame dictionary documented in ``hspy.drivers._frame``:
+            always 'frame' / 'frame_unit' plus identity, time and auxiliary
+            data, 'pix' with the raw digits, and 'pix_comp' / 'pix_dK' for
+            whichever stages applyCalib / calcdK asked for. Does NOT contain
+            a 'success' or 'image_id' key - the calling thread is responsible
+            for adding those.
         """
         data = self.read_frame()                    # read pixels, atc, ptat, vdd
 
-        if read_eloff:
+        # Fresh electrical offsets every eloff_every-th frame; the ones in
+        # between reuse the last BLIND conversion (Section 15.3)
+        if self._n_since_eloff >= self.eloff_every:
             data.update(self.read_electrical_offsets())   # read electrical offsets
+            self._n_since_eloff = 1
+        else:
+            self._n_since_eloff += 1
+
+        # Stamped here, with the device reads done and the processing below
+        # still ahead: this is when the frame was captured, not when its
+        # compensation happened to finish.
+        t = datetime.now()
+        t_mono = time.monotonic()
 
         data = self.convert_spi_data(data)          # convert and rearrange raw spi data
 
-        if applyCalib:
+        if self.applyCalib:
             # Calculates compensated pixel voltages from raw pixel data given
             # the calibration data from the internal flash
             data = self.apply_calib(data)
 
-        if calcdK:
+        if self.calcdK:
             data = self.apply_LuT(data)
 
-        return data
+        return new_frame(interface='spi',
+                         ArrayType=self.ArrayType,
+                         shape=(_ROWS, _COLS),
+                         DevID=self.DevID,
+                         t=t,
+                         t_mono=t_mono,
+                         pix=data['pix'],
+                         pix_comp=data.get('pix_comp'),
+                         pix_dK=data.get('pix_dK'),
+                         eloff=data['eloff'],
+                         ptat=data['ptat'],
+                         vdd=data['vdd'],
+                         atc=data['atc'],
+                         ptat_avg=data.get('ptat_avg'),
+                         Tamb=data.get('Tamb'),
+                         raw=data if self.keep_raw else None)
 
     def convert_spi_data(self, data: dict) -> dict:
         """
@@ -519,8 +599,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         if self._eloff_last is None:
             raise SPI_HTPA160x120dR1Error(
-                "No electrical offsets available. Call read_electrical_offsets() "
-                "or acquire_frame(read_eloff=True) at least once."
+                "No electrical offsets available. Call "
+                "read_electrical_offsets() at least once, or let "
+                "acquire_frame() do it (it reads them on its first call)."
             )
 
         # ------------- Append converted data to dict and return --------------
@@ -751,6 +832,16 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         dict
             The same dictionary with the key 'pix_dK' added.
         """
+
+        if self._LuT is None:
+            raise SPI_HTPA160x120dR1Error(
+                "No LuT set: assign one to driver.LuT, or construct the "
+                "driver with calcdK=False.")
+
+        if 'pix_comp' not in data:
+            raise SPI_HTPA160x120dR1Error(
+                "apply_LuT() needs the compensated pixel voltages. Construct "
+                "the driver with applyCalib=True, or with calcdK=False.")
 
         # Arrange the compensated pixel voltages and the ambient temperature
         # in a np.ndarray

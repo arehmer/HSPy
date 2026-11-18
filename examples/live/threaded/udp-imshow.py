@@ -4,10 +4,6 @@ Created on Tue Oct 27 13:19:51 2026
 
 @author: rehmer
 
-Multiprocessing counterpart of udp-imshow.py.
-
-
-
 HTPA Device Discovery and Binding Script
 ----------------------------------------
 
@@ -15,10 +11,12 @@ HTPA Device Discovery and Binding Script
 This script discovers HTPA thermal imaging devices on a network using a user-
 provided broadcast address. After detecting devices via a UDP broadcast, the
 script interactively prompts the user to select one of the discovered devices.
-It then initializes the appropriate ArrayType for that device, starts threads
-responsible for receiving UDP packets and visualizing the frames using OpenCV,
-keeps them running for approximately 20 seconds, and finally shuts them down
-cleanly.
+It then opens a UDP_HTPA driver for that device, starts threads responsible for
+receiving UDP packets and visualizing the frames using OpenCV, keeps them
+running until Enter is pressed, and finally shuts them down cleanly.
+
+The device's ArrayType does not have to be looked up: UDP_HTPA reads it off the
+answer to the bind call and builds its own TPArray from it.
 
 
 Usage Examples
@@ -26,11 +24,11 @@ Usage Examples
 
 
 Windows PowerShell:
-python ./StreamHTPADevice.py --bcast 192.168.178.255
+python ./udp-imshow.py --bcast 192.168.178.255
 
 
 Linux shell (bash):
-python ./StreamHTPADevice.py --bcast 192.168.178.255
+python ./udp-imshow.py --bcast 192.168.178.255
 
 
 Command-line Arguments
@@ -38,38 +36,24 @@ Command-line Arguments
 --bcast : str (required)
 Broadcast address used to detect HTPA devices on the network.
 
+--no-imshow : flag
+Disables cv2.imshow().
+
 
 This script follows standard Python CLI practices, using argparse for argument
 parsing and conventional object/thread lifecycle management.
 """
 
-import multiprocessing as mp
-import time
+from queue import Queue
 import argparse
 
-from hspy.ipc.processes_base import SharedMemoryQueue
-from hspy.ipc.processes import USB_ClientProcess, ImshowProcess
-from hspy.drivers.usb import USB_HTPA
-
-
-import pickle as pkl
-from queue import Queue
-import time
-from pathlib import Path
-import argparse  
-
-from hspy.readers import HTPA_UDPReader
-from hspy.tparray import TPArray
-from hspy.ipc.threads import UDP_Client,Imshow
+from hspy.drivers.udp import UDP_HTPA, HTPA_UDPReader
+from hspy.ipc.threads import UDP_Client, Imshow
 from hspy.ipc.threads_base import RThread
-
-# from hspytools.ipc.threads import UDP, Record_Thread, FileWriter_Thread
-
-from threading import Condition
 
 # %% Create an argument parser to enable passing argument from the
 # command line to this script
-arg_parser = argparse.ArgumentParser(prog = 'udp-imshow.py.py',
+arg_parser = argparse.ArgumentParser(prog = 'udp-imshow.py',
                                      description="Searches for HTPA devices in a specified subnet and starts a continuous live-stream of a specified device.")
 
 # %% Add arguments using '--key' style
@@ -93,17 +77,17 @@ imshow = args.imshow
 
 # %% Main loop
 if __name__ == '__main__':
-    
-    # %% Create instance of UDP reader
+
+    # %% Discovery is the one job that is not about a single device, so it
+    # is still HTPA_UDPReader's: broadcast, then let the user pick.
     udp_reader = HTPA_UDPReader()
-    
-    # %% Broadcast looking for devices
+
     devices = udp_reader.broadcast(bcast_addr)
-    
+
     # If no devices found, end script
-    if len( udp_reader.devices.index) == 0:
+    if len(udp_reader.devices.index) == 0:
         raise ValueError('No devices found.')
-    
+
     # Get user input on which device to bind
     while True:
         try:
@@ -114,45 +98,43 @@ if __name__ == '__main__':
                 print(f'HTPA device with ID {DevID} not discovered.')
         except ValueError:
             print("Please enter a valid integer.")
-    
-    
-    # Get the ArrayType of the selected device
-    ArrayType = devices.loc[DevID,'Arraytype']
-    
-    # Set the ArrayType of the HTPA_UDPReader class
-    udp_reader.ArrayType = ArrayType
-    
-    # Create threads which bind the device, receive the udp packages and 
-    # plot the frame
-    
+
+    # %% Open the driver for the selected device. It binds the device here,
+    # in the main thread, and reads its ArrayType off the bind answer -- so
+    # nothing below has to be told which sensor this is.
+    IP = udp_reader.devices.loc[DevID, 'IP']
+
+    udp_driver = UDP_HTPA(IP = IP)
+
+    print(f'Bound {udp_driver!r}')
+
     # Create buffers for communication between threads
     udp_buffer = Queue(maxsize=1)
 
-    # Create instance of UDP thread 
-    udp_thread = UDP_Client(udp_reader = udp_reader,
+    # Create instance of UDP thread. It starts and stops the stream; the
+    # driver itself belongs to this script (see the close() below).
+    udp_thread = UDP_Client(udp_driver = udp_driver,
                             name = 'udp_thread',
-                            DevID = DevID,
-                            Bcast_Addr = bcast_addr,
                             write_buffer = udp_buffer)
-        
+
     # Distinguish between the cases of plotting the sensor stream or not
-    if imshow: 
+    if imshow:
         # Create instance of Imshow thread for plotting using cv2.imshow
-        plot_thread = Imshow(ArrayType = ArrayType,
+        plot_thread = Imshow(ArrayType = udp_driver.ArrayType,
                              name = 'imshow_thread',
                              read_buffer = udp_buffer)
-            
+
     elif not imshow:
-        # Create a dummy read thread, that only empties the queue and releases 
+        # Create a dummy read thread, that only empties the queue and releases
         # the lock on the writing condition
         def dummy_target():
             udp_buffer.get()  # drain one item from the queue each cycle
-        
+
         plot_thread = RThread(target = dummy_target,
                               read_buffer = udp_buffer)
-        
-        
-        
+
+
+
     # Start the threads
     print('Starting threads...')
     udp_thread.start()
@@ -164,7 +146,7 @@ if __name__ == '__main__':
         # too many resources, waiting for Enter
         input('Press Enter to stop...\n')
         print("Stopping processes...")
-        
+
     except (KeyboardInterrupt, EOFError):
         # Ctrl+C still works as a fallback; EOFError if stdin is closed
         print("\nStopping processes...")
@@ -172,12 +154,12 @@ if __name__ == '__main__':
         # Stop the threads in reversed order!
         plot_thread.stop()
         udp_thread.stop()
-        
+
         udp_thread.join()          # stops the device stream on its way out
         plot_thread.join()
-        
-        # udp_reader.close()         # release the USB device
-        
+
+        udp_driver.close()         # release the device and close its socket
+
         print("All threads stopped.")
-    
+
     print('End')

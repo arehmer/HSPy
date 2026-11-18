@@ -25,6 +25,8 @@ from typing import List, Optional
 import numpy as np
 
 from hspy.LuT import LuT
+from hspy.tparray import TPArray
+from hspy.drivers._frame import new_frame
 # ---------------------------------------------------------------------------
 # Attempt to import smbus2; fall back to a stub so the module can be imported
 # on non-Linux hosts for testing / offline use.
@@ -130,6 +132,12 @@ _F_CLK_MIN       = 1      # MHz, min. clock frequency
 _F_CLK_MAX       = 13     # MHz, max. clock frequency
 _N_PTAT           = 8      # Number of PTATs
 
+# ── Array type ────────────────────────────────────────────────────────────────
+# This driver only talks to the HTPA32x32dR2, so its array type is fixed.
+# The number is the one hspy.tparray.ArrayTypes gives for it, which is what
+# the frame dict and every consumer built on TPArray expect.
+_ARRAY_TYPE = 10           # 'HTPA32x32dR2' in hspy.tparray.ArrayTypes
+
 
 class I2C_Driver:
     pass
@@ -165,6 +173,12 @@ class I2C_HTPA32x32d(I2C_Driver):
         i2c_addr: int = _ADDR_SENSOR,
         eeprom_addr: int = _ADDR_EEPROM,
         timeout_ms: int = 500,
+        active_vdd: bool = True,
+        blind_vdd: bool = False,
+        applyCalib: bool = True,
+        calcdK: bool = True,
+        keep_raw: bool = False,
+        DevID: int = -1,
     ):
         """
         Parameters
@@ -173,15 +187,55 @@ class I2C_HTPA32x32d(I2C_Driver):
         i2c_addr    : 7-bit sensor address (default 0x1A)
         eeprom_addr : 7-bit EEPROM address (default 0x50)
         timeout_ms  : Maximum wait time for end-of-conversion
+
+        The rest are the acquisition options acquire_frame() works by. They
+        live here, rather than being arguments of acquire_frame(), so that the
+        call in an acquisition loop is argument-free and identical for every
+        driver in hspy.drivers. They stay writable as plain attributes, so a
+        caller can still flip one between frames.
+
+        active_vdd  : sample VDD while the BLIND bit is not set
+        blind_vdd   : sample VDD while the BLIND bit is set. Must differ from
+                      active_vdd (see convert_i2c_data).
+        applyCalib  : apply the EEPROM calibration, i.e. produce
+                      frame['pix_comp']
+        calcdK      : apply the LuT, i.e. produce frame['pix_dK']. Needs
+                      applyCalib=True and self.LuT to be set.
+        keep_raw    : if True, every frame carries the raw I2C bytes and the
+                      intermediate compensation terms under frame['raw'].
+                      Off by default: they roughly double the size of a
+                      pickled frame, which matters for the fixed-size slots
+                      of a SharedMemoryQueue.
+        DevID       : optional device number, copied into every frame as
+                      frame['DevID'] so that a consumer fed by several
+                      devices can tell them apart. -1 (default) means "not
+                      set".
         """
-        
+
         # Call constructor of parent class
         super(I2C_HTPA32x32d,self).__init__()
-        
+
         self._bus_num    = bus
         self._addr       = i2c_addr
         self._eep_addr   = eeprom_addr
         self._bus: Optional[SMBus] = None
+
+        # Acquisition options (see the docstring above)
+        self.active_vdd = active_vdd
+        self.blind_vdd  = blind_vdd
+        self.applyCalib = applyCalib
+        self.calcdK     = calcdK
+        self.keep_raw   = keep_raw
+        self.DevID      = DevID
+
+        # This driver only ever talks to one kind of sensor, so the array type
+        # and the TPArray describing its data layout are fixed
+        self.ArrayType = _ARRAY_TYPE
+        self.tparray = TPArray(ArrayType=_ARRAY_TYPE)
+
+        # Set by the LuT property; apply_LuT() raises a readable error while
+        # this is None rather than failing with an AttributeError
+        self._LuT: Optional[LuT] = None
 
         # Calibration constants (populated by load_calibration / init)
         self._calib: dict = {}
@@ -317,53 +371,69 @@ class I2C_HTPA32x32d(I2C_Driver):
 
     
     # ── Single-call frame acquisition (for use in a thread's loop body) ──────
-    def acquire_frame(self,
-                      active_vdd:bool = True,   # sample vdd when BLIND bit is not set
-                      blind_vdd:bool = False,   # sample vdd when BLIND bit is set
-                      applyCalib:bool = True,   # apply calibration for Ud compensation
-                      calcdK:bool = True) -> dict:      # apply LuT to Ud_comp
+    def acquire_frame(self) -> dict:
         """
         Acquire and fully process one frame: reads the raw pixel data and
         electrical offsets from the sensor over I2C, then converts/rearranges
         the raw bytes and (optionally) applies calibration and the LuT.
 
+        Takes no arguments: what it does is set by the attributes
+        active_vdd, blind_vdd, applyCalib, calcdK and keep_raw, so that this
+        call is identical for every driver in hspy.drivers and an acquisition
+        loop does not have to know which one it is driving.
+
         This bundles what used to be two internally-threaded steps
         (``_read_thread`` + ``_processing_thread``) into a single blocking
         call, so it is intended to be called once per loop iteration by an
-        externally-owned thread class - analogous to how
-        ``HTPA_UDPReader.read_continuous_bytestream()`` is called from
-        within ``UDP_Client``.
-
-        Parameters
-        ----------
-        active_vdd, blind_vdd : see read_frame() / read_electrical_offsets()
-        applyCalib : if True, apply EEPROM calibration (apply_calib)
-        calcdK     : if True, apply the LuT to the calibrated voltages
-                    (apply_LuT). Requires applyCalib=True and self.LuT to be set.
+        externally-owned thread class - the same way ``USB_Client`` and
+        ``UDP_Client`` call their drivers.
 
         Returns
         -------
         dict
-            Raw + converted (+ calibrated / LuT-mapped) frame data. Does
-            NOT contain a 'success' or 'image_id' key - the calling thread
-            is responsible for adding those, the same way UDP_Client does.
+            The frame dictionary documented in ``hspy.drivers._frame``:
+            always 'frame' / 'frame_unit' plus identity, time and auxiliary
+            data, 'pix' with the raw digits, and 'pix_comp' / 'pix_dK' for
+            whichever stages applyCalib / calcdK asked for. Does NOT contain
+            a 'success' or 'image_id' key - the calling thread is responsible
+            for adding those.
         """
-        data = self.read_frame(active_vdd)                        # read pixels, ptat, vdd
-        data.update(self.read_electrical_offsets(blind_vdd))      # read electrical offsets
+        data = self.read_frame(self.active_vdd)                   # read pixels, ptat, vdd
+        data.update(self.read_electrical_offsets(self.blind_vdd)) # read electrical offsets
+
+        # Stamped here, with the device reads done and the processing below
+        # still ahead: this is when the frame was captured, not when its
+        # compensation happened to finish.
+        t = datetime.now()
+        t_mono = time.monotonic()
 
         data = self.convert_i2c_data(data,
-                                     active_vdd,
-                                     blind_vdd)                    # convert and rearrange raw i2c data
+                                     self.active_vdd,
+                                     self.blind_vdd)               # convert and rearrange raw i2c data
 
-        if applyCalib:
+        if self.applyCalib:
             # Calculates Temperatures from pixel voltages given cali-
             # bration data from EEPROM
             data = self.apply_calib(data)
 
-        if calcdK:
+        if self.calcdK:
             data = self.apply_LuT(data)
 
-        return data
+        return new_frame(interface='i2c',
+                         ArrayType=self.ArrayType,
+                         shape=(_ROWS, _COLS),
+                         DevID=self.DevID,
+                         t=t,
+                         t_mono=t_mono,
+                         pix=data['pix'],
+                         pix_comp=data.get('pix_comp'),
+                         pix_dK=data.get('pix_dK'),
+                         eloff=data['eloff'],
+                         ptat=data['ptat'],
+                         vdd=data['vdd'],
+                         ptat_avg=data.get('ptat_avg'),
+                         Tamb=data.get('Tamb'),
+                         raw=data if self.keep_raw else None)
 
     def convert_i2c_data(self,
                          data:dict, 
@@ -701,7 +771,17 @@ class I2C_HTPA32x32d(I2C_Driver):
         None.
 
         """
-        
+
+        if self._LuT is None:
+            raise I2C_HTPA32x32dError(
+                "No LuT set: assign one to driver.LuT, or construct the "
+                "driver with calcdK=False.")
+
+        if 'pix_comp' not in data:
+            raise I2C_HTPA32x32dError(
+                "apply_LuT() needs the compensated pixel voltages. Construct "
+                "the driver with applyCalib=True, or with calcdK=False.")
+
         # Arrange the comensated pixel voltages and the ambient temperature
         # in a np.ndarray
         Ud_Ta = np.hstack([data['pix_comp'].reshape((-1,1)),
