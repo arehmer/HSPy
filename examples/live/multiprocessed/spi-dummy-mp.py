@@ -77,7 +77,9 @@ if __name__ == '__main__':
                              ArrayType=ArrayType)
 
         def _target(self):
+            print(1)
             data = self._get()
+            print(2)
             print('Received data from SPI process: ', data.keys())
 
     dummy_consumer = RProcess_R1(name='dummy_process',
