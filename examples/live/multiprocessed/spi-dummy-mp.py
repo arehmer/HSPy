@@ -93,13 +93,17 @@ if __name__ == '__main__':
     dummy_consumer.start()
     print('Processes started.')
 
+
     try:
         # Keep the main process alive and responsive without wasting
-        # too many resources, waiting for Ctrl+C
-        while True:
-            time.sleep(0.5)
-    except KeyboardInterrupt:
+        # too many resources, waiting for Enter
+        input('Press Enter to stop...\n')
+        print("Stopping processes...")
+
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl+C still works as a fallback; EOFError if stdin is closed
         print("\nStopping processes...")
+
     finally:
         # Stop in reverse order regardless of how we exit
         dummy_consumer.stop()
