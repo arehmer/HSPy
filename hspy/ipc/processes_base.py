@@ -387,7 +387,6 @@ class RProcess_R1(Process):
         pass
 
     def run(self):
-        print('run1')
         self._setup()
 
         if self.profile:
@@ -396,7 +395,7 @@ class RProcess_R1(Process):
             prof_last_t = time.perf_counter()
 
         while not self._exit.is_set():
-            print('run2')
+
             try:
                 if self.profile:
                     t_cycle_start = time.perf_counter()
@@ -414,8 +413,9 @@ class RProcess_R1(Process):
                         _print_profile_report(self.name, prof)
 
                 else:
-                    print('run3')
+                    print('run1')
                     self._target()
+                    print('run2')
 
             except queue.Empty:
                 # Nothing arrived within get_timeout. Let the subclass do
