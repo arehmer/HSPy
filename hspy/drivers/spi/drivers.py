@@ -1296,7 +1296,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         if self._ee_enable is not None:
             self._ee_enable(True)
         else:
-            self._spi.cs_high = self._cs_high
+            self._spi.cshigh = self._cs_high
         self._sel_sensor = True
 
     def _select_flash(self) -> None:
@@ -1306,7 +1306,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         if self._ee_enable is not None:
             self._ee_enable(False)
         else:
-            self._spi.cs_high = not self._cs_high
+            self._spi.cshigh = not self._cs_high
         self._sel_sensor = False
 
     def _write_register(self, cmd: int, value: int) -> None:
