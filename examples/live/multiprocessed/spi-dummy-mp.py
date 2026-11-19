@@ -71,6 +71,7 @@ if __name__ == '__main__':
 
     #%% Create a dummy consumer process
     class dummy_process(RProcess_R1):
+
         def __init__(self, name, read_buffer):
             super().__init__(name=name,
                              read_buffer=read_buffer)
@@ -82,7 +83,7 @@ if __name__ == '__main__':
             print('Received data from SPI process: ', data.keys())
             print('target3')
 
-    dummy_consumer = RProcess_R1(name='dummy_process',
+    dummy_consumer = dummy_process(name='dummy_process',
                                 read_buffer=spi_buffer)
 
     print('Starting processes...')
