@@ -28,6 +28,7 @@ there, not in __init__. __init__ still runs in the *parent* process (the
 same as for any Process subclass) and should only store picklable
 configuration (class references, kwarg dicts, paths, numbers, ...).
 """
+from abc import ABCMeta, abstractmethod
 
 from multiprocessing import Process, Event
 from multiprocessing import Queue as MPQueue
@@ -341,9 +342,9 @@ class WProcess_R1(Process):
         process once the loop has exited (e.g. closing a device)."""
         pass
 
+    @abstractmethod
     def _target(self):
         """Override in subclass to produce data."""
-        raise NotImplementedError
 
     def stop(self):
         self._exit.set()
@@ -413,16 +414,13 @@ class RProcess_R1(Process):
                         _print_profile_report(self.name, prof)
 
                 else:
-                    print('run1')
                     self._target()
-                    print('run2')
 
             except queue.Empty:
                 # Nothing arrived within get_timeout. Let the subclass do
                 # its idle work, then re-check the exit flag at the top of
                 # the loop instead of waiting here for an item that may
                 # never come.
-                print('run4')
                 self._on_idle()
                 continue
 
@@ -455,10 +453,10 @@ class RProcess_R1(Process):
     def _teardown(self):
         pass
 
+    @abstractmethod
     def _target(self):
         """Override in subclass. Should read from self.read_buffer via
         self._get()."""
-        raise NotImplementedError
 
     def stop(self):
         self._exit.set()
@@ -583,10 +581,10 @@ class RWProcess_R1(Process):
     def _teardown(self):
         pass
 
+    @abstractmethod
     def _target(self):
         """Override in subclass. Should read from self.read_buffer via
         self._get()."""
-        raise NotImplementedError
 
     def stop(self):
         self._exit.set()

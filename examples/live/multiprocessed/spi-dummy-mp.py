@@ -79,9 +79,8 @@ if __name__ == '__main__':
         def _target(self):
             print('target1')
             data = self._get()
-            print('target2')
+            print(data)
             print('Received data from SPI process: ', data.keys())
-            print('target3')
 
     dummy_consumer = dummy_process(name='dummy_process',
                                 read_buffer=spi_buffer)
