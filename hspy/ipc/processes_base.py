@@ -387,7 +387,7 @@ class RProcess_R1(Process):
         pass
 
     def run(self):
-
+        print('run1')
         self._setup()
 
         if self.profile:
@@ -396,7 +396,7 @@ class RProcess_R1(Process):
             prof_last_t = time.perf_counter()
 
         while not self._exit.is_set():
-
+            print('run2')
             try:
                 if self.profile:
                     t_cycle_start = time.perf_counter()
@@ -414,6 +414,7 @@ class RProcess_R1(Process):
                         _print_profile_report(self.name, prof)
 
                 else:
+                    print('run3')
                     self._target()
 
             except queue.Empty:
@@ -421,6 +422,7 @@ class RProcess_R1(Process):
                 # its idle work, then re-check the exit flag at the top of
                 # the loop instead of waiting here for an item that may
                 # never come.
+                print('run4')
                 self._on_idle()
                 continue
 
