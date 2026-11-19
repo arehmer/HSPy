@@ -76,10 +76,11 @@ if __name__ == '__main__':
                              read_buffer=read_buffer)
 
         def _target(self):
-            print(1)
+            print('target1')
             data = self._get()
-            print(2)
+            print('target2')
             print('Received data from SPI process: ', data.keys())
+            print('target3')
 
     dummy_consumer = RProcess_R1(name='dummy_process',
                                 read_buffer=spi_buffer)
