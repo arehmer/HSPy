@@ -71,10 +71,9 @@ if __name__ == '__main__':
 
     #%% Create a dummy consumer process
     class dummy_process(RProcess_R1):
-        def __init__(self, name, read_buffer, ArrayType):
+        def __init__(self, name, read_buffer):
             super().__init__(name=name,
-                             read_buffer=read_buffer,
-                             ArrayType=ArrayType)
+                             read_buffer=read_buffer)
 
         def _target(self):
             print(1)
