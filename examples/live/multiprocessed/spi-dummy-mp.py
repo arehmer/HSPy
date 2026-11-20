@@ -17,7 +17,13 @@ import time
 from pathlib import Path
 import argparse
 
-from gpiozero import DigitalOutputDevice
+# gpiozero is only defined fo Raspberry Pis
+try:
+    from gpiozero import DigitalOutputDevice
+    from gpiozero.exc import BadPinFactory
+    _GPIOZERO_AVAILABLE = True
+except ImportError:
+    _GPIOZERO_AVAILABLE = False
 
 from hspy.ipc.processes_base import SharedMemoryQueue
 from hspy.ipc.processes import SPI_ClientProcess, ImshowProcess
@@ -40,11 +46,32 @@ arg_parser.add_argument("--bus",
 arg_parser.add_argument("--calcdK",
                         dest = "calcdK",
                         type=bool,
-                        requirsed=False,
+                        required=False,
                         default=False,
                         help="Whether to calculate dK values.")
 
+# Returns a callable that drives the GPIO pin to enable/disable the EEPROM on the HTPA board
+def make_ee_enable(pin: int = 8):
+    """
+    Return an ee_enable(level) callable for SPI_HTPA160x120dR1, driving
+    BCM GPIO `pin`. Raises RuntimeError with a clear message on machines
+    without gpiozero or without GPIO hardware.
+    """
+    if not _GPIOZERO_AVAILABLE:
+        raise RuntimeError("gpiozero is not installed. Run: pip install gpiozero")
+    try:
+        ee = DigitalOutputDevice(pin, initial_value=True)   # idle HIGH
+    except BadPinFactory as e:
+        raise RuntimeError(
+            "No GPIO hardware found: gpiozero only drives pins on a "
+            "Raspberry Pi (or with a mock pin factory for testing)."
+        ) from e
 
+    def ee_enable(level: bool) -> None:
+        ee.value = level
+
+    ee_enable.device = ee        # keep a handle, e.g. for ee_enable.device.close()
+    return ee_enable
 
 # %% Parse arguments
 args = arg_parser.parse_args()
@@ -72,10 +99,9 @@ if __name__ == '__main__':
 
     #%% Create SPI_ClientProcess
     # Driver needs to know which GPIO pin is used to enable the EEPROM on the HTPA board
-    ee = DigitalOutputDevice(8, initial_value=True)
     spi_driver_kwargs = {'bus': bus,
                          'device' : 0,
-                         'ee_enable': lambda level: setattr(ee, 'value', level),
+                         'ee_enable': make_ee_enable(pin=8),
                          'calcdK': calcdK}
     
     spi_process = SPI_ClientProcess(spi_driver_cls = SPI_HTPA160x120dR1,
