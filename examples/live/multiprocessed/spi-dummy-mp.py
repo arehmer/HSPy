@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 import argparse
 
+from gpiozero import DigitalOutputDevice
+
 from hspy.ipc.processes_base import SharedMemoryQueue
 from hspy.ipc.processes import SPI_ClientProcess, ImshowProcess
 from hspy.drivers.spi import SPI_HTPA160x120dR1
@@ -60,6 +62,13 @@ if __name__ == '__main__':
     spi_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=4 * 1024 * 1024)
 
     #%% Create SPI_ClientProcess
+    # Driver needs to know which GPIO pin is used to enable the EEPROM on the HTPA board
+    ee = DigitalOutputDevice(8, initial_value=True)
+    spi_driver_kwargs = {'bus': bus,
+                         'device' : 0,
+                         'ee_enable': lambda level: setattr(ee, 'value', level),
+                         'calcdK': False}
+    
     spi_process = SPI_ClientProcess(spi_driver_cls = SPI_HTPA160x120dR1,
                                     spi_driver_kwargs = {},
                                     write_buffer = spi_buffer,
