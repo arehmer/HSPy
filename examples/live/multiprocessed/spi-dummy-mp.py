@@ -37,10 +37,19 @@ arg_parser.add_argument("--bus",
                         required=True,
                         help="SPI bus that HTPA device is connected to.")
 
+arg_parser.add_argument("--calcdK",
+                        dest = "calcdK",
+                        type=bool,
+                        requirsed=False,
+                        default=False,
+                        help="Whether to calculate dK values.")
+
+
 
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
+calcdK = args.calcdK
 
 # %% Main
 #
@@ -67,10 +76,10 @@ if __name__ == '__main__':
     spi_driver_kwargs = {'bus': bus,
                          'device' : 0,
                          'ee_enable': lambda level: setattr(ee, 'value', level),
-                         'calcdK': False}
+                         'calcdK': calcdK}
     
     spi_process = SPI_ClientProcess(spi_driver_cls = SPI_HTPA160x120dR1,
-                                    spi_driver_kwargs = {},
+                                    spi_driver_kwargs = spi_driver_kwargs,
                                     write_buffer = spi_buffer,
                                     lut_csv_path = None,
                                     lut_offset = 0,
