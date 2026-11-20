@@ -19,7 +19,9 @@ Chip select (Section 12):
 
   EE_Enable therefore is a chip select for both devices, active HIGH for
   the sensor and active LOW for the flash, and has to produce one edge pair
-  per transfer. On current Raspberry Pi kernels SPI_CS_HIGH is no longer
+  per transfer. Between transfers it rests HIGH, so that the flash is never
+  selected while the bus is idle (handling notice for the internal flash);
+  a sensor frame is delimited by short LOW pulses (Figures 12 to 14). On current Raspberry Pi kernels SPI_CS_HIGH is no longer
   supported, so EE_Enable is driven from a GPIO (see ``ee_enable``) and
   framed around every transfer in _xfer(). Because EE_Enable has to be
   toggled, no other device may share these SPI lines.
@@ -125,6 +127,8 @@ _BIT_EOC = (1 << 0)  # End-of-conversion bitwise mask
 
 # -- Internal flash (SST26VF016B) command bytes -----------------------------
 _FLASH_CMD_READ = 0x03  # Read, 24-bit address, no dummy byte
+_FLASH_CMD_JEDEC_ID = 0x9F  # JEDEC ID: manufacturer, type, device
+_FLASH_JEDEC_ID = (0xBF, 0x26, 0x41)  # Microchip/SST, SST26 series, 016B
 
 # -- Flash memory map (Figure 10 of datasheet) ------------------------------
 # NOTE: Section 15.2 quotes ThGrad "from 0x3B20 to 0x6270", which is neither
@@ -256,12 +260,10 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                          transfer and LOW for every flash transfer, matching
                          Figures 8 and 9. Set to False if EE_Enable is
                          inverted in hardware.
-        ee_enable      : Callable ``ee_enable(level: bool)`` that sets the
-                         GPIO wired to EE_Enable (True = HIGH). Recommended:
-                         current Raspberry Pi kernels no longer support
-                         SPI_CS_HIGH on the hardware chip select. If None,
-                         the driver falls back to the hardware chip select
-                         and its CS_HIGH flag.
+        ee_enable      : Required. Callable ``ee_enable(level: bool)`` that
+                         sets the GPIO wired to EE_Enable (True = HIGH).
+                         The SPI controller's own chip select cannot drive
+                         EE_Enable on current Raspberry Pi kernels.
         max_xfer_bytes : Largest single SPI transfer; must not exceed the
                          spidev buffer size (``bufsiz``, 4096 by default).
         timeout_factor : End-of-conversion timeout as a multiple of the
@@ -298,6 +300,16 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # Call constructor of parent class
         super(SPI_HTPA160x120dR1, self).__init__()
 
+        if ee_enable is None:
+            raise ValueError(
+                "ee_enable is required: pass a callable that sets the GPIO "
+                "wired to EE_Enable, e.g. ee_enable=lambda level: "
+                "setattr(pin, 'value', level) with a gpiozero "
+                "DigitalOutputDevice. The SPI controller's own chip select "
+                "cannot drive EE_Enable on current Raspberry Pi kernels "
+                "(see the module docstring)."
+            )
+
         if max_speed_hz > _F_SPI_MAX:
             raise ValueError(
                 f"max_speed_hz {max_speed_hz} exceeds the specified maximum "
@@ -333,10 +345,8 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         self.ArrayType = _ARRAY_TYPE
         self.tparray = TPArray(ArrayType=_ARRAY_TYPE)
 
-        # Last level written to EE_Enable (GPIO path) resp. last CS_HIGH
-        # setting (hardware chip select path); None = unknown
+        # Last level written to EE_Enable; None = unknown
         self._ee_level: Optional[bool] = None
-        self._hw_cshigh: Optional[bool] = None
 
         # Look-up-table, set via the LuT property
         self._LuT: Optional[LuT] = None
@@ -402,19 +412,18 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         self._spi.lsbfirst = False
         self._spi.max_speed_hz = self._speed
 
-        if self._ee_enable is not None:
-            # EE_Enable is on a GPIO: keep the controller's own chip select
-            # out of the way if the kernel allows it. If not, the CEx pin
-            # simply toggles unconnected, which does no harm.
-            try:
-                self._spi.no_cs = True
-            except OSError:
-                pass
-            # Park EE_Enable at the sensor's idle level
-            self._ee_level = None
-            self._set_ee(not self._cs_high)
-        else:
-            self._hw_cshigh = None
+        # Keep the controller's own chip select out of the way if the kernel
+        # allows it. If not, a CEx pin that is not wired to anything simply
+        # toggles unconnected, which does no harm.
+        try:
+            self._spi.no_cs = True
+        except OSError:
+            pass
+
+        # Park EE_Enable at its idle level: sensor selected, flash not
+        # selected (handling notice for the internal flash)
+        self._ee_level = None
+        self._set_ee(self._cs_high)
 
         # Wait for the sensor to finish its power-on reset (Table 5)
         time.sleep(_T_STARTUP_US * 1e-6)
@@ -946,6 +955,10 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         Read all calibration constants from the internal flash (Figure 10)
         and cache them in self._calib. Called automatically by init().
         """
+        # Make sure the flash, not the sensor, answers before trusting
+        # anything read from it
+        self.check_flash()
+
         c: dict = {}
 
         def u8(addr: int) -> int:
@@ -1050,6 +1063,27 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         c["vddcompoff_arr"]  = self._sort_perBlock_calibData(c["vddcompoff"])
 
         self._calib = c
+
+    def read_flash_id(self) -> bytes:
+        """Return the 3-byte JEDEC ID of the internal flash."""
+        rx = self._xfer([_FLASH_CMD_JEDEC_ID, 0x00, 0x00, 0x00], sensor=False)
+        return bytes(rx[1:4])
+
+    def check_flash(self) -> None:
+        """
+        Read the JEDEC ID of the internal flash and raise if it is not the
+        SST26VF016B. A wrong ID almost always means EE_Enable does not reach
+        the sensor (wrong GPIO, wrong polarity, pin still claimed by the SPI
+        driver), so the flash is never selected.
+        """
+        jid = self.read_flash_id()
+        if tuple(jid) != _FLASH_JEDEC_ID:
+            raise SPI_HTPA160x120dR1Error(
+                f"Internal flash did not answer: JEDEC ID {jid.hex(' ')}, "
+                f"expected {bytes(_FLASH_JEDEC_ID).hex(' ')} (SST26VF016B). "
+                f"Check that ee_enable drives the pin wired to EE_Enable "
+                f"and that sensor_cs_high matches the wiring."
+            )
 
     def _sort_perBlock_calibData(self, block_data: list) -> np.ndarray:
         """
@@ -1351,39 +1385,33 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         """
         One framed SPI transfer to the sensor or to the internal flash.
 
-        EE_Enable acts as a chip select with opposite polarity for the two
-        devices (Section 12, Figures 8 and 9):
+        EE_Enable rests at the sensor level (HIGH) between transfers, so the
+        flash is never selected while the bus is idle (datasheet, handling
+        notice for the internal flash). Frames (Figures 12 to 14, Tbuf):
 
-            sensor:  idle LOW  -> HIGH  -> transfer -> LOW
-            flash :  idle HIGH -> LOW   -> transfer -> HIGH
+            sensor:  HIGH -> LOW -> HIGH (start) -> transfer -> LOW (stop) -> HIGH
+            flash :  HIGH -> LOW (CE# active)    -> transfer -> HIGH
 
-        Every transfer gets its own edge pair, exactly like a hardware chip
-        select would produce it. This is what SPI_CS_HIGH used to do for us.
+        The LOW pulses around a sensor frame last a few microseconds when
+        driven from Python, well above Tbuf = 200 ns. They select the flash
+        without any clock, which the flash ignores.
         """
-        if self._ee_enable is None:
-            # Legacy path: let the SPI controller drive EE_Enable via the
-            # hardware chip select and its CS_HIGH flag.
-            want_cshigh = self._cs_high if sensor else not self._cs_high
-            if self._hw_cshigh is not want_cshigh:
-                try:
-                    self._spi.cshigh = want_cshigh
-                except OSError as e:
-                    raise SPI_HTPA160x120dR1Error(
-                        "The SPI driver refused SPI_CS_HIGH (current Raspberry "
-                        "Pi kernels drive chip select via GPIO and no longer "
-                        "support it). Wire EE_Enable to a free GPIO and pass "
-                        "ee_enable=... to the constructor."
-                    ) from e
-                self._hw_cshigh = want_cshigh
-            return self._spi.xfer2(tx)
-
-        active = self._cs_high if sensor else not self._cs_high
-        self._set_ee(not active)        # make sure we start from idle
-        self._set_ee(active)            # start of frame
-        try:
-            return self._spi.xfer2(tx)
-        finally:
-            self._set_ee(not active)    # end of frame
+        s_lvl = self._cs_high               # level that selects the sensor
+        self._set_ee(s_lvl)                 # idle
+        if sensor:
+            self._set_ee(not s_lvl)         # stop / Tbuf
+            self._set_ee(s_lvl)             # start
+            try:
+                return self._spi.xfer2(tx)
+            finally:
+                self._set_ee(not s_lvl)     # stop
+                self._set_ee(s_lvl)         # back to idle
+        else:
+            self._set_ee(not s_lvl)         # flash CE# active
+            try:
+                return self._spi.xfer2(tx)
+            finally:
+                self._set_ee(s_lvl)         # flash CE# inactive = idle
 
     def _write_register(self, cmd: int, value: int) -> None:
         """
