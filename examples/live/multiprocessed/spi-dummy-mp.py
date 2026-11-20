@@ -121,9 +121,7 @@ if __name__ == '__main__':
                              read_buffer=read_buffer)
 
         def _target(self):
-            print('target1')
             data = self._get()
-            print(data)
             print('Received data from SPI process: ', data.keys())
 
     dummy_consumer = dummy_process(name='dummy_process',

@@ -4,6 +4,9 @@ Created on Thu Feb  8 16:11:36 2024
 
 @author: rehmer
 """
+import csv
+import re
+from datetime import datetime
 from typing import List
 from pathlib import Path
 import pandas as pd
@@ -11,6 +14,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
+from openpyxl.utils import get_column_letter
 from warnings import warn
 
 
@@ -20,8 +24,10 @@ class LuT:
     def __init__(self,**kwargs):
         
         self._LuT = None                    # Look-up-Table as pd.DataFrame
-        self._LuTGridInterpolator = None    # SciPy Regular Grid Interpolator, generated automatically  
-        
+        self._LuTGridInterpolator = None    # SciPy Regular Grid Interpolator, generated automatically
+        self.meta = None                    # Key-value pairs above the LuT, set by from_HTPAxls()
+        self.sheet_name = None              # Sheet name in LookUpTablesHTPA.xlsm, set by from_HTPAxls()
+
         pass
     
     @property
@@ -55,9 +61,36 @@ class LuT:
     def from_csv(self,csv_path,offset):
         
         self.offset = offset
-        
+
+        # Header block written by to_csv(): key,value lines up to the first
+        # empty line. Files without an empty line contain only the table.
+        with open(csv_path,newline='',encoding='utf-8-sig') as f:
+            rows = list(csv.reader(f))
+        blank = next((i for i,row in enumerate(rows) if not row),None)
+
+        if blank is not None:
+
+            def parse(v):
+                if v == '':
+                    return None
+                for conv in (int,float,datetime.fromisoformat):
+                    try:
+                        return conv(v)
+                    except ValueError:
+                        pass
+                return v
+
+            self.meta = {key:parse(value) for key,value in rows[:blank]}
+
+            # Sheet name from file name LuTNr<Tablenumber>_<sheet_name>.csv
+            match = re.fullmatch(r'LuTNr\d+_(.+)',Path(csv_path).stem)
+            if match:
+                self.sheet_name = match.group(1)
+
         # Import data
-        LuT = pd.read_csv(csv_path, sep=',',header=0,index_col = 0)
+        LuT = pd.read_csv(csv_path, sep=',',header=0,index_col = 0,
+                          skiprows = 0 if blank is None else blank+1,
+                          float_precision = 'round_trip')
         
         # Convert column header to int
         LuT.columns = np.array([int(c) for c in LuT.columns])
@@ -76,10 +109,121 @@ class LuT:
         xlsx_standard = Path('T:/Projekte/HTPA8x8_16x16_32x31/Datasheet/LookUpTablesHTPA.xlsm')
         
         xlsx_path = kwargs.pop('xlsx_path',xlsx_standard)
+
+        raw = pd.read_excel(xlsx_path,sheet_name=sheet_name,header=None,
+                            dtype=object)
+
+        # Detect table layout, explicitly passed kwargs take precedence
+        layout = self._detect_HTPAxls_layout(raw,sheet_name)
+        kwargs = {**layout,**kwargs}
+
         self.from_xlsx(xlsx_path,sheet_name,**kwargs)
+
+        # Key-value pairs above the table
+        self.meta = self._read_HTPAxls_meta(raw,layout['skiprows'])
+        self.sheet_name = sheet_name
+
         print(sheet_name + ' successfully loaded.')
         return None
-        
+
+    @staticmethod
+    def _read_HTPAxls_meta(raw,header) -> dict:
+        """
+        Reads the key-value pairs in columns A:B and H:I above the 'V' row
+        (or above the table header if there is no 'V' row). Empty values
+        become None.
+        """
+
+        colA = raw.iloc[:header,0].map(lambda v: str(v).strip()
+                                       if pd.notna(v) else '')
+        stop = next((r for r in range(header) if colA[r] == 'V'),header)
+
+        meta = {}
+        for c in [0,7]:
+            for r in range(stop):
+                key = raw.iat[r,c]
+                if pd.isna(key):
+                    continue
+                value = raw.iat[r,c+1]
+                meta[str(key).strip()] = None if pd.isna(value) else value
+
+        return meta
+
+    @staticmethod
+    def _detect_HTPAxls_layout(raw,sheet_name) -> dict:
+        """
+        Locates the LuT in a sheet of LookUpTablesHTPA.xlsm and returns the
+        keyword arguments skiprows, header, index_col and usecols for
+        from_xlsx().
+
+        The table is expected to consist of a header row (Ud, Ud_norm, br,
+        Ta values, br) followed by data rows (Ud, Ud_norm, '{', To values,
+        '}') that extend to the end of the sheet. Raises ValueError on any
+        deviation (gaps, trailing rows, non-numeric values, non-ascending Ud).
+        """
+
+        def cell(r,c):
+            return f"'{sheet_name}'!{get_column_letter(c+1)}{r+1}"
+
+        def to_num(v):
+            # Accepts numbers and strings like '1234,', returns None otherwise
+            if isinstance(v,str):
+                try:
+                    return float(v.strip().rstrip(','))
+                except ValueError:
+                    return None
+            if isinstance(v,(int,float)) and not pd.isna(v):
+                return v
+            return None
+
+        def is_bracket(v,b):
+            return isinstance(v,str) and v.strip().startswith(b)
+
+        if raw.shape[1] < 4:
+            raise ValueError(f"No LuT found in sheet '{sheet_name}'.")
+
+        # First data row: numeric Ud in column A and '{' in column C
+        first = next((r for r in range(len(raw))
+                      if to_num(raw.iat[r,0]) is not None
+                      and is_bracket(raw.iat[r,2],'{')),None)
+        if first is None or first == 0:
+            raise ValueError(f"No LuT found in sheet '{sheet_name}'.")
+        header = first - 1
+
+        # Ta columns end at the closing bracket of the first data row
+        close = next((c for c in range(3,raw.shape[1])
+                      if is_bracket(raw.iat[first,c],'}')),None)
+        if close is None or close < 4:
+            raise ValueError(f'No closing bracket found in row {cell(first,0)}.')
+
+        # Header must hold the Ta values
+        for c in range(3,close):
+            if to_num(raw.iat[header,c]) is None:
+                raise ValueError(f'Ta value expected in {cell(header,c)}, ' +\
+                                 f'found {raw.iat[header,c]!r}.')
+
+        # Every row from first to the end of the sheet must be a data row
+        Ud_prev = None
+        for r in range(first,len(raw)):
+            for c in [0,1] + list(range(3,close)):
+                if to_num(raw.iat[r,c]) is None:
+                    raise ValueError(f'Numeric value expected in ' +\
+                                     f'{cell(r,c)}, found {raw.iat[r,c]!r}.')
+            for c,b in [(2,'{'),(close,'}')]:
+                if not is_bracket(raw.iat[r,c],b):
+                    raise ValueError(f"'{b}' expected in {cell(r,c)}, " +\
+                                     f'found {raw.iat[r,c]!r}.')
+            Ud = to_num(raw.iat[r,0])
+            if Ud_prev is not None and Ud <= Ud_prev:
+                raise ValueError(f'Ud not strictly ascending in {cell(r,0)}' +\
+                                 f' ({Ud_prev:g} followed by {Ud:g}).')
+            Ud_prev = Ud
+
+        return {'skiprows':header,
+                'header':0,
+                'index_col':0,
+                'usecols':[0] + list(range(3,close))}
+
     def from_xlsx(self,xlsx_path,sheet_name,**kwargs):
         
         index_col = kwargs.pop('index_col',0)
@@ -97,7 +241,8 @@ class LuT:
         
         # Delete all commata
         df = df.replace(',','',regex=True)
-        
+        df.columns = [int(str(c).rstrip(',')) for c in df.columns]
+
         # Cast all columns to int
         df = df.astype(np.int32)
         
@@ -153,6 +298,30 @@ class LuT:
         self.LuTGridInterpolator = interp
     
     
+    def to_csv(self,folder) -> Path:
+        """
+        Writes the header dictionary (key,value per line), an empty line and
+        the LuT (index Ud, columns Ta) to
+        <folder>/LuTNr<Tablenumber>_<sheet_name>.csv. Requires a LuT loaded
+        with from_HTPAxls(). Returns the path of the written file.
+        """
+
+        if self.meta is None or self.sheet_name is None:
+            raise ValueError('to_csv() requires a LuT loaded with ' +\
+                             'from_HTPAxls().')
+
+        csv_path = Path(folder) / \
+            f"LuTNr{self.meta['Tablenumber']}_{self.sheet_name}.csv"
+
+        with open(csv_path,'w',newline='',encoding='utf-8') as f:
+            writer = csv.writer(f,lineterminator='\n')
+            for key,value in self.meta.items():
+                writer.writerow([key,'' if value is None else value])
+            writer.writerow([])
+            self.LuT.to_csv(f,lineterminator='\n')
+
+        return csv_path
+
     def to_xlsx(self,xlsx_path):
         
         # Load LuT

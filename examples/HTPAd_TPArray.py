@@ -61,8 +61,7 @@ plt.imshow(frame10_comp)
 # %% Next initialize a LuT object
 LuT150 = LuT()
 try:
-    LuT150.LuT_from_HTPAxls('60x40dL1k9',
-                            usecols='A,D:O')
+    LuT150.from_HTPAxls('60x40dL1k9')
 except Exception as e:
     print(f'Seems as you are not within Heimann Sensor premises! Exception: {e}')
 
