@@ -228,7 +228,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         from hspy.drivers.spi import SPI_HTPA160x120dR1
 
-        with SPI_HTPA160x120dR1(bus=0, device=0, calcdK=False) as sensor:
+        with SPI_HTPA160x120dR1(bus=0, device=0, ee_enable=ee_enable) as sensor:
             frame = sensor.acquire_frame()
             print(frame['Tamb'], frame['frame'].reshape(frame['shape']))
     """
@@ -246,7 +246,6 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         timeout_factor: float = 4.0,
         eloff_every: int = 1,
         applyCalib: bool = True,
-        calcdK: bool = True,
         keep_raw: bool = False,
         DevID: int = -1,
     ):
@@ -284,8 +283,6 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                          the old read_eloff argument frame by frame.
         applyCalib     : apply the flash calibration, i.e. produce
                          frame['pix_comp']
-        calcdK         : apply the LuT, i.e. produce frame['pix_dK']. Needs
-                         applyCalib=True and self.LuT to be set.
         keep_raw       : if True, every frame carries the raw SPI bytes and
                          the intermediate compensation terms under
                          frame['raw']. Off by default: they roughly double the
@@ -295,6 +292,11 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                          frame['DevID'] so that a consumer fed by several
                          devices can tell them apart. -1 (default) means
                          "not set".
+
+        Whether the LuT is applied, i.e. frame['pix_dK'] is produced, is not
+        an argument: init() calls load_lut(), which sets the attribute calcdK
+        depending on whether hspy/luts holds the table matching the table
+        number in the flash.
         """
 
         # Call constructor of parent class
@@ -331,7 +333,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # Acquisition options (see the docstring above)
         self.eloff_every = int(eloff_every)
         self.applyCalib  = applyCalib
-        self.calcdK      = calcdK
+        self.calcdK      = False        # set by load_lut() / the LuT property
         self.keep_raw    = keep_raw
         self.DevID       = DevID
 
@@ -391,6 +393,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
             raise TypeError(f'LuT object is not type {type(LuT)} but {type(lut)}.')
         else:
             self._LuT = lut
+            self.calcdK = self.applyCalib
 
     @property
     def calib(self) -> dict:
@@ -455,8 +458,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                              Section 15: the temperature calculation is only
                              valid with the settings used during calibration.
         """
-        # Step 1 - calibration data
+        # Step 1 - calibration data and the LuT matching its table number
         self.load_calibration()
+        self.load_lut()
 
         # Step 2 - wake up sensor (Table 5)
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP)
@@ -895,13 +899,13 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         if self._LuT is None:
             raise SPI_HTPA160x120dR1Error(
-                "No LuT set: assign one to driver.LuT, or construct the "
-                "driver with calcdK=False.")
+                "No LuT set: assign one to driver.LuT, or set "
+                "driver.calcdK = False.")
 
         if 'pix_comp' not in data:
             raise SPI_HTPA160x120dR1Error(
                 "apply_LuT() needs the compensated pixel voltages. Construct "
-                "the driver with applyCalib=True, or with calcdK=False.")
+                "the driver with applyCalib=True, or set driver.calcdK = False.")
 
         # Arrange the compensated pixel voltages and the ambient temperature
         # in a np.ndarray
@@ -1298,17 +1302,22 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         return active
 
-    def load_lut(self, lut: LuT) -> None:
+    def load_lut(self, lut: Optional[LuT] = None) -> None:
         """
         Load the sensor-specific look-up table for object-temperature
-        calculation (Section 16.2).
+        calculation (Section 16.2) and set calcdK accordingly. Called
+        automatically by init().
 
-        Heimann Sensor provides this table in a separate file called "Table.c";
-        the matching table is identified by the table number stored in the
-        flash (``self.calib['table_number']``). Parse it into a
-        :class:`hspy.LuT.LuT` and pass it here before calling apply_LuT().
+        Without an argument, the table matching the table number in the flash
+        (``self.calib['table_number']``) is loaded from hspy/luts. If there is
+        none, no LuT is set and calcdK is False. calcdK is also False while
+        applyCalib is False, since apply_LuT() needs frame['pix_comp'].
         """
-        self.LuT = lut
+        if lut is None:
+            lut = LuT.from_table_number(self._calib['table_number'])
+
+        self._LuT = lut
+        self.calcdK = lut is not None and self.applyCalib
 
     # -- Trim register helpers -----------------------------------------------
 

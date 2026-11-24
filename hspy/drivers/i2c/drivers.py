@@ -84,6 +84,7 @@ _BIT_EOC = (1 << 0)  # End-of-conversion bitwise mask
 _EEP_PIXCMIN            = 0x0000   # float32  minimum sensitivity coefficient
 _EEP_PIXCMAX            = 0x0004   # float32  maximum sensitivity coefficient
 _EEP_GRADSCALE          = 0x0008   # uint8    thermal gradient scaling exponent
+_EEP_TABLENUMBER        = 0x000B   # uint16 LE look-up table number (TN)
 _EEP_EPSILON            = 0x000D   # uint8    emissivity (100 = 1.00)
 _EEP_MBITREFCAL_CALIB   = 0x001A   # uint8    MBIT used during factory calibration
 _EEP_BIAS_CALIB         = 0x001B   # uint8s
@@ -176,7 +177,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         active_vdd: bool = True,
         blind_vdd: bool = False,
         applyCalib: bool = True,
-        calcdK: bool = True,
         keep_raw: bool = False,
         DevID: int = -1,
     ):
@@ -199,8 +199,6 @@ class I2C_HTPA32x32d(I2C_Driver):
                       active_vdd (see convert_i2c_data).
         applyCalib  : apply the EEPROM calibration, i.e. produce
                       frame['pix_comp']
-        calcdK      : apply the LuT, i.e. produce frame['pix_dK']. Needs
-                      applyCalib=True and self.LuT to be set.
         keep_raw    : if True, every frame carries the raw I2C bytes and the
                       intermediate compensation terms under frame['raw'].
                       Off by default: they roughly double the size of a
@@ -210,6 +208,11 @@ class I2C_HTPA32x32d(I2C_Driver):
                       frame['DevID'] so that a consumer fed by several
                       devices can tell them apart. -1 (default) means "not
                       set".
+
+        Whether the LuT is applied, i.e. frame['pix_dK'] is produced, is not
+        an argument: init() calls load_lut(), which sets the attribute calcdK
+        depending on whether hspy/luts holds the table matching the table
+        number in the EEPROM.
         """
 
         # Call constructor of parent class
@@ -224,7 +227,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         self.active_vdd = active_vdd
         self.blind_vdd  = blind_vdd
         self.applyCalib = applyCalib
-        self.calcdK     = calcdK
+        self.calcdK     = False         # set by load_lut() / the LuT property
         self.keep_raw   = keep_raw
         self.DevID      = DevID
 
@@ -271,6 +274,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             raise TypeError(f'LuT object is not type {type(LuT)} but {type(lut)}.')
         else:
             self._LuT = lut
+            self.calcdK = self.applyCalib
     
     # ── Bus open / close ─────────────────────────────────────────────────────
     def open(self) -> None:
@@ -315,8 +319,9 @@ class I2C_HTPA32x32d(I2C_Driver):
                              values stored during factory calibration.
                              If False use the user-defined EEPROM copies.
         """
-        # Step 1 – calibration data
+        # Step 1 – calibration data and the LuT matching its table number
         self.load_calibration()
+        self.load_lut()
 
         # Step 2 – wake up sensor (Section 11.5)
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP)
@@ -357,7 +362,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         self._calib["F_CLK"] = F_CLK
         self._calib["t_fr4"] = t_fr4
-        self._timeout_ms = t_fr4 * 1e3 * 1.1            # Timeout for EOC is conversion time plus 10% 
+        self._timeout_ms = t_fr4 *  1.1            # Timeout for EOC is conversion time plus 10% 
 
     def sleep(self) -> None:
         """Put sensor into sleep state (~9 µA standby current)."""
@@ -774,13 +779,13 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         if self._LuT is None:
             raise I2C_HTPA32x32dError(
-                "No LuT set: assign one to driver.LuT, or construct the "
-                "driver with calcdK=False.")
+                "No LuT set: assign one to driver.LuT, or set "
+                "driver.calcdK = False.")
 
         if 'pix_comp' not in data:
             raise I2C_HTPA32x32dError(
                 "apply_LuT() needs the compensated pixel voltages. Construct "
-                "the driver with applyCalib=True, or with calcdK=False.")
+                "the driver with applyCalib=True, or set driver.calcdK = False.")
 
         # Arrange the comensated pixel voltages and the ambient temperature
         # in a np.ndarray
@@ -846,6 +851,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         c["pixcmin"]       = f32(_EEP_PIXCMIN)
         c["pixcmax"]       = f32(_EEP_PIXCMAX)
         c["gradscale"]     = u8 (_EEP_GRADSCALE)
+        c["table_number"]  = u16(_EEP_TABLENUMBER)
         c["epsilon"]       = u8 (_EEP_EPSILON)
 
         # Factory calibration trim settings
@@ -859,8 +865,8 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         # User trim settings
         c["mbitrefcal_user"]    = u8 (_EEP_MBITREFCAL_USER)
-        c["mbit_calib"]         = unpack_mbit(c["mbitrefcal_user"])
-        c["refcal_calib"]       = unpack_refcal(c["mbitrefcal_user"])
+        c["mbit_user"]         = unpack_mbit(c["mbitrefcal_user"])
+        c["refcal_user"]       = unpack_refcal(c["mbitrefcal_user"])
         c["bias_user"]          = u8 (_EEP_BIAS_USER)
         c["clk_user"]           = u8 (_EEP_CLK_USER)
         c["bpa_user"]           = u8 (_EEP_BPA_USER)
@@ -1108,33 +1114,22 @@ class I2C_HTPA32x32d(I2C_Driver):
         return active
 
     
-    def load_lut(
-        self,
-        ta_cols: List[float],
-        dig_rows: List[float],
-        data: List[List[float]],
-    ) -> None:
+    def load_lut(self, lut: Optional[LuT] = None) -> None:
         """
         Load the sensor-specific look-up table for object-temperature
-        calculation (Section 13.2).
+        calculation (Section 13.2) and set calcdK accordingly. Called
+        automatically by init().
 
-        Heimann Sensor provides this table in a separate file called "Table.c".
-        Parse the values from that file and pass them here before calling
-        calculate_temperatures().
-
-        Parameters
-        ----------
-        ta_cols  : Ambient temperature column headers in dK
-                   e.g. [2782, 2882, 2982, 3082, 3182, 3282, 3382]
-        dig_rows : Compensated pixel voltage row headers (digit values)
-                   e.g. [-512, -448, ..., 0, ..., 8192]
-        data     : 2-D list [row_index][col_index] of object temperatures in dK
+        Without an argument, the table matching the table number in the
+        EEPROM (``self._calib['table_number']``) is loaded from hspy/luts. If
+        there is none, no LuT is set and calcdK is False. calcdK is also False
+        while applyCalib is False, since apply_LuT() needs frame['pix_comp'].
         """
-        self._calib["lut"] = {
-            "ta_cols":  ta_cols,
-            "dig_rows": dig_rows,
-            "data":     data,
-        }
+        if lut is None:
+            lut = LuT.from_table_number(self._calib['table_number'])
+
+        self._LuT = lut
+        self.calcdK = lut is not None and self.applyCalib
 
     # ── Trim register helpers ─────────────────────────────────────────────────
 
@@ -1265,66 +1260,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         gg    = c["global_gain"] / 10000.0
         scale = (pmax - pmin) / 65535.0
         return [(c["pij"][n] * scale + pmin) * eps * gg for n in range(_PIXELS)]
-
-    # ── Private: LUT bilinear interpolation (Section 13.2) ───────────────────
-
-    def _lut_interpolate(
-        self, v_pixc: float, ta_dk: float, c: dict
-    ) -> float:
-        """
-        Return object temperature in dK via bilinear interpolation into the
-        look-up table.
-
-        If no LUT has been loaded the ambient temperature is returned as a
-        best-effort fallback.
-        """
-        if "lut" not in c:
-            return ta_dk   # no LUT – fall back to ambient temperature
-
-        lut      = c["lut"]
-        ta_cols  = lut["ta_cols"]
-        dig_rows = lut["dig_rows"]
-        data     = lut["data"]
-
-        # Clamp to table extent
-        ta  = max(ta_cols[0],  min(ta_cols[-1],  ta_dk))
-        dig = max(dig_rows[0], min(dig_rows[-1], v_pixc))
-
-        # Column index (ambient temperature axis)
-        ci = 0
-        for i in range(len(ta_cols) - 1):
-            if ta_cols[i + 1] > ta:
-                ci = i
-                break
-        else:
-            ci = len(ta_cols) - 2
-        
-        # Row index (digit axis)
-        ri = 0
-        for i in range(len(dig_rows) - 1):
-            if dig_rows[i + 1] > dig:
-                ri = i
-                break
-        else:
-            ri = len(dig_rows) - 2
-
-        # Fractional positions
-        dta  = ta_cols[ci + 1]  - ta_cols[ci]
-        ddig = dig_rows[ri + 1] - dig_rows[ri]
-        ta_f  = (ta  - ta_cols[ci])  / dta  if dta  != 0 else 0.0
-        dig_f = (dig - dig_rows[ri]) / ddig if ddig != 0 else 0.0
-
-        # Bilinear interpolation over the four surrounding LUT cells
-        q11 = data[ri][ci]
-        q12 = data[ri][ci + 1]
-        q21 = data[ri + 1][ci]
-        q22 = data[ri + 1][ci + 1]
-
-        return (q11 * (1 - ta_f) * (1 - dig_f)
-                + q12 * ta_f       * (1 - dig_f)
-                + q21 * (1 - ta_f) * dig_f
-                + q22 * ta_f       * dig_f)
-
 
     # ── Private: stack buffer helpers ────────────────────────────────────────
 

@@ -460,7 +460,7 @@ class I2C_Client(WThread_R1):
             Driver instance providing acquire_frame(). Must already be
             open()'ed and init()'ed (this is done in I2C_HTPA32x32d.__init__).
             Everything about how a frame is acquired -- active_vdd,
-            blind_vdd, applyCalib, calcdK, keep_raw -- is set on the
+            blind_vdd, applyCalib, keep_raw -- is set on the
             driver, not here.
         write_buffer : Queue
             Buffer that processed frames are put into for the downstream
@@ -564,7 +564,7 @@ class SPI_Client(WThread_R1):
             Driver instance providing acquire_frame(). Must already be
             open()'ed and init()'ed (this is done in its __init__).
             Everything about how a frame is acquired -- eloff_every,
-            applyCalib, calcdK, keep_raw -- is set on the driver, not here.
+            applyCalib, keep_raw -- is set on the driver, not here.
         write_buffer : Queue
             Buffer that processed frames are put into for the downstream
             thread to consume.

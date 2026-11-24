@@ -7,7 +7,7 @@ Created on Thu Feb  8 16:11:36 2024
 import csv
 import re
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -17,6 +17,9 @@ from scipy.interpolate import RegularGridInterpolator
 from openpyxl.utils import get_column_letter
 from warnings import warn
 
+
+# Folder with the LuTs exported from LookUpTablesHTPA.xlsm by to_csv()
+LUT_FOLDER = Path(__file__).parent / 'luts'
 
 
 class LuT:
@@ -49,7 +52,32 @@ class LuT:
             raise TypeError(f'interpol is not type {type(RegularGridInterpolator)} but {type(interpol)}.')
         else:
             self._LuTGridInterpolator = interpol
-    
+
+    @classmethod
+    def from_table_number(cls,table_number:int,
+                          folder=LUT_FOLDER) -> Optional['LuT']:
+        """
+        Loads the LuT <folder>/LuTNr<table_number>_<sheet_name>.csv written
+        by to_csv(). Returns None if there is no such file and raises
+        ValueError if there is more than one.
+        """
+
+        matches = sorted(Path(folder).glob(f'LuTNr{table_number}_*.csv'))
+
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            raise ValueError(
+                f'{len(matches)} LuTs with table number {table_number} in '
+                f'{folder}: {", ".join(m.name for m in matches)}. Load the '
+                'right one with from_csv() and assign it to the driver.')
+
+        lut = cls()
+        lut.from_csv(matches[0])
+
+        return lut
+
     def from_df(self,df):
         
         # Set class property        
@@ -58,9 +86,7 @@ class LuT:
         # Create LuTGridInterpolator for fast bilinear interpolation
         self._create_LuTGridInterpolator()
         
-    def from_csv(self,csv_path,offset):
-        
-        self.offset = offset
+    def from_csv(self,csv_path):
 
         # Header block written by to_csv(): key,value lines up to the first
         # empty line. Files without an empty line contain only the table.
@@ -94,10 +120,7 @@ class LuT:
         
         # Convert column header to int
         LuT.columns = np.array([int(c) for c in LuT.columns])
-        
-        # Subtract offset
-        LuT.index = LuT.index - offset
-        
+
         # Set class property   
         self.LuT = LuT
         

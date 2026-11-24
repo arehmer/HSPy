@@ -67,8 +67,8 @@ def test_acquisition_options_are_constructor_arguments():
     __init__ now, and keep_raw exists on every driver."""
 
     expected = {I2C_HTPA32x32d: ('active_vdd', 'blind_vdd', 'applyCalib',
-                                 'calcdK', 'keep_raw', 'DevID'),
-                SPI_HTPA160x120dR1: ('eloff_every', 'applyCalib', 'calcdK',
+                                 'keep_raw', 'DevID'),
+                SPI_HTPA160x120dR1: ('eloff_every', 'applyCalib',
                                      'keep_raw', 'DevID'),
                 UDP_HTPA: ('stream_cmd', 'keep_raw'),
                 USB_HTPA: ('timeout_ms', 'keep_raw', 'DevID')}
@@ -78,6 +78,23 @@ def test_acquisition_options_are_constructor_arguments():
         missing = [o for o in options if o not in parameters]
         assert not missing, \
             f"{driver.__name__}.__init__ is missing {missing}."
+
+
+def test_calcdK_is_decided_by_the_driver():
+    """calcdK is no constructor argument: I2C and SPI set it in load_lut()
+    from the table number, UDP and USB derive it from the stream command."""
+
+    for driver in DRIVERS:
+        assert 'calcdK' not in inspect.signature(driver.__init__).parameters, \
+            f"{driver.__name__}.__init__ still takes calcdK."
+
+    for driver in (I2C_HTPA32x32d, SPI_HTPA160x120dR1):
+        assert list(inspect.signature(driver.load_lut).parameters) == \
+            ['self', 'lut'], f"{driver.__name__}.load_lut() has another signature."
+
+    for driver in (UDP_HTPA, USB_HTPA):
+        assert isinstance(driver.calcdK, property), \
+            f"{driver.__name__}.calcdK is not a property."
 
 
 # ── 2. The contract itself ───────────────────────────────────────────────────

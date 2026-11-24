@@ -123,7 +123,7 @@ hot-loop call is argument-free and literally identical for every interface:
 | option | drivers | note |
 |---|---|---|
 | `applyCalib` | i2c, spi | |
-| `calcdK` | i2c, spi | |
+| `calcdK` | i2c, spi | not a constructor argument: `init()` calls `load_lut()`, which loads the LuT matching the table number in the EEPROM/flash from `hspy/luts` and sets `calcdK` to whether one was found (and `applyCalib` is on). Assigning `driver.LuT` sets it too. Read-only property on udp/usb: `stream_cmd == b'K'`. |
 | `active_vdd`, `blind_vdd` | i2c | |
 | `eloff_every` | spi | **new**: replaces per-call `read_eloff`. `1` = every frame, `8` = every 8th (what §15.3 recommends). The driver keeps the counter and reuses the last offsets in between, so the client no longer has to toggle anything. |
 | `timeout_ms` | usb | |
