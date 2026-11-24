@@ -263,6 +263,14 @@ class USB_HTPA(USB_Driver):
         return self._stream_cmd
 
     @property
+    def calcdK(self) -> bool:
+        """
+        True if frames carry 'pix_dK'. Read-only: the device applies its own
+        look-up table when streaming with b'K', the host never does.
+        """
+        return self._stream_cmd == _CMD_STREAM_DK
+
+    @property
     def width(self) -> Optional[int]:
         return None if self.tparray is None else self.tparray.width
 

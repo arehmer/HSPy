@@ -1229,6 +1229,14 @@ class UDP_HTPA(UDP_Driver):
         return self._streaming
 
     @property
+    def calcdK(self) -> bool:
+        """
+        True if frames carry 'pix_dK'. Read-only: the device applies its own
+        look-up table when streaming with b'K', the host never does.
+        """
+        return self.stream_cmd == b'K'
+
+    @property
     def DevID(self) -> int:
         return self._DevID
 
