@@ -43,13 +43,6 @@ arg_parser.add_argument("--bus",
                         required=True,
                         help="SPI bus that HTPA device is connected to.")
 
-arg_parser.add_argument("--calcdK",
-                        dest = "calcdK",
-                        type=bool,
-                        required=False,
-                        default=False,
-                        help="Whether to calculate dK values.")
-
 # Returns a callable that drives the GPIO pin to enable/disable the EEPROM on the HTPA board
 def make_ee_enable(pin: int = 8):
     """
@@ -76,7 +69,6 @@ def make_ee_enable(pin: int = 8):
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
-calcdK = args.calcdK
 
 # %% Main
 #
@@ -101,14 +93,12 @@ if __name__ == '__main__':
     # Driver needs to know which GPIO pin is used to enable the EEPROM on the HTPA board
     spi_driver_kwargs = {'bus': bus,
                          'device' : 0,
-                         'ee_enable': make_ee_enable(pin=8),
-                         'calcdK': calcdK}
+                         'ee_enable': make_ee_enable(pin=8)}
     
     spi_process = SPI_ClientProcess(spi_driver_cls = SPI_HTPA160x120dR1,
                                     spi_driver_kwargs = spi_driver_kwargs,
                                     write_buffer = spi_buffer,
                                     lut_csv_path = None,
-                                    lut_offset = 0,
                                     profile = True,
                                     profile_every= 50)
 

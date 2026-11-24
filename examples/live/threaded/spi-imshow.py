@@ -71,18 +71,17 @@ if __name__ == '__main__':
     #                  every 8th frame only (Section 15.3), which the driver
     #                  keeps count of itself
     #   applyCalib     every frame carries 'pix_comp'
-    #   calcdK         every frame carries 'pix_dK' -- needs a LuT, so it is
-    #                  off when none was given on the command line
+    # A LuT matching the table number in the flash is loaded from hspy/luts
+    # automatically; frames carry 'pix_dK' if there is one.
     spi_driver = SPI_HTPA160x120dR1(bus = bus,
                                     device = device,
                                     eloff_every = 8,
-                                    applyCalib = True,
-                                    calcdK = lut_path is not None)
+                                    applyCalib = True)
 
-    # Load and assign the LuT
+    # A LuT given on the command line replaces the automatic one
     if lut_path is not None:
         lut = LuT()
-        lut.from_csv(lut_path, offset=0)
+        lut.from_csv(lut_path)
         spi_driver.LuT = lut
 
     #%% Create SPI_Client thread, which calls spi_driver.acquire_frame()

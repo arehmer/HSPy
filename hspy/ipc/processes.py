@@ -685,7 +685,6 @@ class I2C_ClientProcess(WProcess_R1):
                  i2c_driver_kwargs: dict,
                  write_buffer,
                  lut_csv_path=None,
-                 lut_offset: int = 0,
                  name: str = 'i2c_process',
                  **kwargs):
         """
@@ -699,7 +698,7 @@ class I2C_ClientProcess(WProcess_R1):
         i2c_driver_kwargs : dict
             Keyword arguments to construct i2c_driver_cls with, e.g.
             {'bus': 1}. Everything about how a frame is acquired --
-            active_vdd, blind_vdd, applyCalib, calcdK, keep_raw -- and the
+            active_vdd, blind_vdd, applyCalib, keep_raw -- and the
             DevID the frames are labelled with goes in here, not into this
             constructor.
         write_buffer : Queue / SharedMemoryQueue
@@ -709,8 +708,6 @@ class I2C_ClientProcess(WProcess_R1):
             driver inside _setup() (mirrors setting i2c_driver.LuT in the
             threading version's calling script). A LuT object cannot be
             handed across a process boundary as cheaply as a path.
-        lut_offset : int
-            Passed through to LuT.from_csv().
         name : str
             Process name.
 
@@ -724,7 +721,6 @@ class I2C_ClientProcess(WProcess_R1):
         self.i2c_driver_kwargs = i2c_driver_kwargs
 
         self.lut_csv_path = lut_csv_path
-        self.lut_offset = lut_offset
 
         super().__init__(name=name,
                          write_buffer=write_buffer,
@@ -743,7 +739,7 @@ class I2C_ClientProcess(WProcess_R1):
 
         if self.lut_csv_path is not None:
             lut = LuT()
-            lut.from_csv(self.lut_csv_path, offset=self.lut_offset)
+            lut.from_csv(self.lut_csv_path)
             self.i2c_driver.LuT = lut
 
         # Set image_id counter
@@ -833,7 +829,6 @@ class SPI_ClientProcess(WProcess_R1):
                  spi_driver_kwargs: dict,
                  write_buffer,
                  lut_csv_path=None,
-                 lut_offset: int = 0,
                  name: str = 'spi_process',
                  **kwargs):
         """
@@ -845,7 +840,7 @@ class SPI_ClientProcess(WProcess_R1):
         spi_driver_kwargs : dict
             Keyword arguments to construct spi_driver_cls with, e.g.
             {'bus': 0, 'device': 0}. Everything about how a frame is
-            acquired -- eloff_every, applyCalib, calcdK, keep_raw -- and
+            acquired -- eloff_every, applyCalib, keep_raw -- and
             the DevID the frames are labelled with goes in here, not into
             this constructor.
         write_buffer : Queue / SharedMemoryQueue
@@ -853,8 +848,6 @@ class SPI_ClientProcess(WProcess_R1):
         lut_csv_path : str or Path, optional
             If given, a LuT is loaded from this CSV and assigned to the
             driver inside _setup().
-        lut_offset : int
-            Passed through to LuT.from_csv().
         name : str
             Process name.
 
@@ -868,7 +861,6 @@ class SPI_ClientProcess(WProcess_R1):
         self.spi_driver_kwargs = spi_driver_kwargs
 
         self.lut_csv_path = lut_csv_path
-        self.lut_offset = lut_offset
 
         super().__init__(name=name,
                          write_buffer=write_buffer,
@@ -887,7 +879,7 @@ class SPI_ClientProcess(WProcess_R1):
 
         if self.lut_csv_path is not None:
             lut = LuT()
-            lut.from_csv(self.lut_csv_path, offset=self.lut_offset)
+            lut.from_csv(self.lut_csv_path)
             self.spi_driver.LuT = lut
 
         # Set image_id counter

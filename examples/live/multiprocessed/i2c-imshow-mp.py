@@ -65,16 +65,15 @@ if __name__ == '__main__':
     # let I2C_ClientProcess load and assign it inside the child.
     #
     # How a frame is acquired goes into i2c_driver_kwargs, since that is
-    # what the driver is built from: applyCalib=True and calcdK=True (both
-    # the default) mean every frame carries 'pix_comp' and 'pix_dK', and
-    # 'frame' is the dK image.
+    # what the driver is built from: applyCalib=True (the default) means
+    # every frame carries 'pix_comp'. The LuT from lut_csv_path replaces the
+    # one the driver loads from hspy/luts by table number, so every frame
+    # carries 'pix_dK' and 'frame' is the dK image.
     i2c_process = I2C_ClientProcess(i2c_driver_cls = I2C_HTPA32x32d,
                                     i2c_driver_kwargs = {'bus': bus,
-                                                         'applyCalib': True,
-                                                         'calcdK': True},
+                                                         'applyCalib': True},
                                     write_buffer = i2c_buffer,
                                     lut_csv_path = Path.cwd() / 'lut/32x32dL1k7.csv',
-                                    lut_offset = 0,
                                     profile = True,
                                     profile_every= 50)
 

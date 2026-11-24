@@ -89,11 +89,9 @@ if __name__ == '__main__':
                                     spi_driver_kwargs = {'bus': bus,
                                                          'device': device,
                                                          'eloff_every': 8,
-                                                         'applyCalib': True,
-                                                         'calcdK': lut_path is not None},
+                                                         'applyCalib': True},
                                     write_buffer = spi_buffer,
                                     lut_csv_path = lut_path,
-                                    lut_offset = 0,
                                     profile = True,
                                     profile_every = 50)
 

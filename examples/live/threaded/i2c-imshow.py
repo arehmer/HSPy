@@ -45,16 +45,16 @@ if __name__ == '__main__':
     #%% Create instance of i2c driver
     # __init__ already opens the bus and calls init(), so the driver is
     # ready to acquire frames as soon as it is constructed. How a frame is
-    # acquired is set here, on the driver: applyCalib=True and calcdK=True
-    # (both the default) mean every frame carries 'pix_comp' and 'pix_dK',
-    # and 'frame' is the dK image.
+    # acquired is set here, on the driver: applyCalib=True (the default)
+    # means every frame carries 'pix_comp'. A LuT matching the table number
+    # in the EEPROM is loaded from hspy/luts automatically.
     i2c_driver = I2C_HTPA32x32d(bus = bus,
-                                applyCalib = True,
-                                calcdK = True)
+                                applyCalib = True)
 
-    # Load and assign the LuT
+    # Assigning a LuT explicitly replaces the automatic one; every frame then
+    # carries 'pix_dK' and 'frame' is the dK image
     lut154 = LuT()
-    lut154.from_csv(Path.cwd() / 'lut/32x32dL1k7.csv', offset=0)
+    lut154.from_csv(Path.cwd() / 'lut/32x32dL1k7.csv')
     i2c_driver.LuT = lut154
 
     # %% Create I2C_Client thread, which calls i2c_driver.acquire_frame()
