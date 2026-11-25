@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Multiprocessing counterpart of spi-process-udp.py.
+Multiprocessing counterpart of spi-udp.py.
 
 Acquires frames from an HTPA sensor over SPI, runs an object-detection
 engine on them, and sends the frame + detection result out via UDP to a
@@ -26,14 +26,13 @@ except ImportError:
     _GPIOZERO_AVAILABLE = False
 
 from hspy.ipc.processes_base import SharedMemoryQueue
-from hspy.ipc.processes import SPI_ClientProcess, ImshowProcess
+from hspy.ipc.processes import SPI_ClientProcess, ImshowProcess, UDP_PickleServerProcess
 from hspy.drivers.spi import SPI_HTPA160x120dR1
-from hspy.ipc.processes_base import RProcess_R1
 
 
 # %% Create an argument parser to enable passing argument from the
 # command line to this script
-arg_parser = argparse.ArgumentParser(prog = 'spi-imshow-mp.py',
+arg_parser = argparse.ArgumentParser(prog = 'spi-udp-mp.py',
                                      description="Connects to a HTPA device via SPI, sapplies a processing engine and sends the result via UDP -- multiprocessing version.")
 
 # %% Add arguments using '--key' style
@@ -42,6 +41,18 @@ arg_parser.add_argument("--bus",
                         type=int,
                         required=True,
                         help="SPI bus that HTPA device is connected to.")
+
+arg_parser.add_argument("--target_ip",
+                        dest="target_ip",
+                        type=str,
+                        required=True,
+                        help="IP address of the peer running UDP_PickleClient(Process).")
+
+arg_parser.add_argument("--target_port",
+                        dest="target_port",
+                        type=int,
+                        required=True,
+                        help="Port the peer's UDP_PickleClient(Process) is listening on.")
 
 # Returns a callable that drives the GPIO pin to enable/disable the EEPROM on the HTPA board
 def make_ee_enable(pin: int = 8):
@@ -69,6 +80,8 @@ def make_ee_enable(pin: int = 8):
 # %% Parse arguments
 args = arg_parser.parse_args()
 bus = args.bus
+target_ip = args.target_ip
+target_port = args.target_port
 
 # %% Main
 #
@@ -83,7 +96,7 @@ bus = args.bus
 # process would itself try to build the whole pipeline again from
 # scratch -> runaway recursive process creation.
 if __name__ == '__main__':
-    print('Reached main')
+
     #%% Create shared-memory-backed buffers for communication between
     # processes (replaces the plain queue.Queue buffers used between
     # threads)
@@ -103,23 +116,18 @@ if __name__ == '__main__':
                                     profile_every= 50)
 
 
-    #%% Create a dummy consumer process
-    class dummy_process(RProcess_R1):
-
-        def __init__(self, name, read_buffer):
-            super().__init__(name=name,
-                             read_buffer=read_buffer)
-
-        def _target(self):
-            data = self._get()
-            print('Received data from SPI process: ', data.keys())
-
-    dummy_consumer = dummy_process(name='dummy_process',
-                                read_buffer=spi_buffer)
+    #%% Create instance of UDP_PickleServerProcess, which sends every frame
+    # from the SPI process to the peer
+    server_process = UDP_PickleServerProcess(name='udp_pickle_server_process',
+                                             read_buffer=spi_buffer,
+                                             target_ip=target_ip,
+                                             target_port=target_port,
+                                             profile = True,
+                                             profile_every= 50)
 
     print('Starting processes...')
     spi_process.start()
-    dummy_consumer.start()
+    server_process.start()
     print('Processes started.')
 
 
@@ -135,11 +143,11 @@ if __name__ == '__main__':
 
     finally:
         # Stop in reverse order regardless of how we exit
-        dummy_consumer.stop()
+        server_process.stop()
         spi_process.stop()
 
         spi_process.join()
-        dummy_consumer.join()
+        server_process.join()
 
         # Release the shared memory backing the buffers
         spi_buffer.close()
