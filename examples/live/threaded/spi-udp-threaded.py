@@ -95,9 +95,12 @@ if __name__ == '__main__':
 
     #%% Open the driver here, in the main thread. Its __init__ opens the
     # SPI device, initialises the sensor and reads the calibration.
+    # eloff_every=8: fresh electrical offsets every 8th frame only, as
+    # recommended in Section 15.3 of the datasheet ("every 8th to 10th frame")
     spi_driver = SPI_HTPA160x120dR1(bus = bus,
                                     device = 0,
-                                    ee_enable = make_ee_enable(pin=8))
+                                    ee_enable = make_ee_enable(pin=8),
+                                    eloff_every = 8)
 
     #%% Create buffers for communication between threads
     # Raw frames from acquisition to processing

@@ -230,7 +230,7 @@ _T_INTER_REG_MS  = 5        # min delay between writing trim registers
 _T_WAKEUP_US     = 80       # wakeup time after WAKEUP command (Table 5)
 _T_STARTUP_US    = 100      # startup time after power-on reset (Table 5)
 _T_BUF_NS        = 200      # min time between STOP / START (Table 5)
-_F_SPI_MAX       = 20000000  # Hz, max. SPI clock (Table 5)
+_F_SPI_MAX       = 13000000  # Hz, max. SPI clock (Table 5)
 _F_CLK_MIN       = 0.5      # MHz, min. internal clock frequency (Table 11)
 _F_CLK_MAX       = 5.5      # MHz, max. internal clock frequency (Table 11)
 _MAX_XFER_BYTES  = 4096     # default spidev buffer size (bufsiz module param)
@@ -389,6 +389,10 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # Last level written to EE_Enable; None = unknown
         self._ee_level: Optional[bool] = None
 
+        # True once the last transfer ended with a rising EE_Enable edge,
+        # which already is the START of the next sensor transfer (Figure 12)
+        self._start_armed = False
+
         # Look-up-table, set via the LuT property
         self._LuT: Optional[LuT] = None
 
@@ -438,6 +442,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         state['_io'] = None
         state['_ee_enable'] = None
         state['_ee_level'] = None
+        state['_start_armed'] = False
         return state
 
     # --- class properties ---------------------------------------------------
@@ -488,6 +493,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # selected (handling notice for the internal flash)
         self._ee_level = None
         self._set_ee(self._cs_high)
+        self._start_armed = False
 
         # Wait for the sensor to finish its power-on reset (Table 5)
         time.sleep(_T_STARTUP_US * 1e-6)
@@ -1528,29 +1534,39 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         flash is never selected while the bus is idle (datasheet, handling
         notice for the internal flash). Frames (Figures 12 to 14, Tbuf):
 
-            sensor:  HIGH -> LOW -> HIGH (start) -> transfer -> LOW (stop) -> HIGH
-            flash :  HIGH -> LOW (CE# active)    -> transfer -> HIGH
+            sensor:  [LOW -> HIGH (start)] -> transfer -> LOW (stop) -> HIGH
+            flash :  LOW (CE# active)      -> transfer -> HIGH
 
-        The LOW pulses around a sensor frame last a few microseconds when
-        driven from Python, well above Tbuf = 200 ns. They select the flash
-        without any clock, which the flash ignores.
+        Figure 12: the falling edge is the STOP, the rising edge after at
+        least Tbuf the START, with no upper limit on the time until the
+        first clock. The rising edge that ends every transfer therefore
+        already is the START of the next sensor transfer, and the leading
+        LOW pulse is only sent while no such edge has occurred yet (first
+        transfer after open()). This halves the GPIO writes per transfer.
+
+        The LOW pulses last a few microseconds when driven from Python, well
+        above Tbuf = 200 ns. They select the flash without any clock, which
+        the flash ignores.
         """
         s_lvl = self._cs_high               # level that selects the sensor
         self._set_ee(s_lvl)                 # idle
         if sensor:
-            self._set_ee(not s_lvl)         # stop / Tbuf
-            self._set_ee(s_lvl)             # start
+            if not self._start_armed:
+                self._set_ee(not s_lvl)     # stop / Tbuf
+                self._set_ee(s_lvl)         # start
             try:
                 return self._spi_transfer(tx)
             finally:
                 self._set_ee(not s_lvl)     # stop
-                self._set_ee(s_lvl)         # back to idle
+                self._set_ee(s_lvl)         # idle = start of the next one
+                self._start_armed = True
         else:
             self._set_ee(not s_lvl)         # flash CE# active
             try:
                 return self._spi_transfer(tx)
             finally:
                 self._set_ee(s_lvl)         # flash CE# inactive = idle
+                self._start_armed = True    # rising edge = sensor start
 
     def _write_register(self, cmd: int, value: int) -> None:
         """
