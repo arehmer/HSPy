@@ -1249,34 +1249,30 @@ class ImshowProcess(RProcess_R1):
             annotations.loc[annotations['label'] == 1, 'confirmed'] = True
             bboxes = annotations
             annot_exist = True
-        # print('db6')
         if annot_exist:
-            # print('db7')
             font = cv2.FONT_HERSHEY_SIMPLEX
             fontScale = 0.4
             fontColor = (255, 255, 0)
             thickness = 1
             lineType = 2
-            # print('db8')
+
             for b in bboxes.index:
-                # print('db9')
                 box = bboxes.loc[[b]]
                 
                 if box['confirmed'].item() != True:
                     continue
-                # print('db1')
                 x, y = int(box['xtl'].item()), int(box['ytl'].item())
                 w = int(box['xbr'].item()) - int(box['xtl'].item())
                 h = int(box['ybr'].item()) - int(box['ytl'].item())
-                # print('db2')
+
                 # Scale coordinates
                 x = int(sf * x); y = int(sf * y); w = int(sf * w); h = int(sf * h)
-                # print('db3')
+
                 frame = cv2.rectangle(frame,
                                       (x, y),
                                       (x + w, y + h),
                                       (255, 255, 0), 1)
-                # print('db4')
+                
                 # Write score if it exists
                 if box['score'].item() != -99:
                     score = f"{box['score'].item():.2}"
@@ -1322,10 +1318,10 @@ class ImshowProcess(RProcess_R1):
         # PTAT plot below the image                                      # ADDED
         if self.plot_ptat:                                               # ADDED
             frame = self._add_ptat_plot(frame, data)                     # ADDED
-        # print('db6')
+
         cv2.imshow(self.window_name, frame)
         cv2.waitKey(1)
-        # print('db7')
+
 
     def _add_ptat_plot(self, frame, data):                               # ADDED
         """Append data['ptat_avg'] to the history and stack the plot
