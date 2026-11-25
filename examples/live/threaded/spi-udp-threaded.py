@@ -126,7 +126,7 @@ if __name__ == '__main__':
                                        profile = True,
                                        profile_every= 50)
 
-    class consumer_thread(RThread_R1):
+    class ConsumerThread(RThread_R1):
         def __init__(self, name, read_buffer):
             super().__init__(name=name,
                              read_buffer=read_buffer)
@@ -134,6 +134,9 @@ if __name__ == '__main__':
 
         def _target(self):
             data = self.read_buffer._get()
+
+    consumer_thread = ConsumerThread(name='consumer_thread',
+                                     read_buffer=raw_buffer)   
 
     # proc_thread = SPI_ProcessingThread(spi_driver = spi_driver,
     #                                    read_buffer = raw_buffer,
