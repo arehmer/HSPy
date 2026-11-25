@@ -133,7 +133,7 @@ if __name__ == '__main__':
             
 
         def _target(self):
-            data = self.read_buffer._get()
+            data = self._get()
 
     consumer_thread = ConsumerThread(name='consumer_thread',
                                      read_buffer=raw_buffer)   
