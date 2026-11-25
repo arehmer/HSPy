@@ -26,7 +26,8 @@ except ImportError:
     _GPIOZERO_AVAILABLE = False
 
 from hspy.ipc.processes_base import SharedMemoryQueue
-from hspy.ipc.processes import SPI_ClientProcess, ImshowProcess, UDP_PickleServerProcess
+from hspy.ipc.processes import (SPI_AcquisitionProcess, SPI_ProcessingProcess,
+                                UDP_PickleServerProcess)
 from hspy.drivers.spi import SPI_HTPA160x120dR1
 
 
@@ -101,20 +102,32 @@ if __name__ == '__main__':
     #%% Create shared-memory-backed buffers for communication between
     # processes (replaces the plain queue.Queue buffers used between
     # threads)
+    # Raw frames (about 42 kB each) from acquisition to processing
+    raw_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=256 * 1024)
+
+    # Processed frames from processing to the UDP server
     spi_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=4 * 1024 * 1024)
 
-    #%% Create SPI_ClientProcess
+    #%% Create the SPI pipeline: one process only acquires raw frames, a
+    # second one converts them and applies calibration and LuT, so that the
+    # next frame is acquired while the previous one is processed
     # Driver needs to know which GPIO pin is used to enable the EEPROM on the HTPA board
     spi_driver_kwargs = {'bus': bus,
                          'device' : 0,
                          'ee_enable': make_ee_enable(pin=8)}
-    
-    spi_process = SPI_ClientProcess(spi_driver_cls = SPI_HTPA160x120dR1,
-                                    spi_driver_kwargs = spi_driver_kwargs,
-                                    write_buffer = spi_buffer,
-                                    lut_csv_path = None,
-                                    profile = True,
-                                    profile_every= 50)
+
+    spi_process = SPI_AcquisitionProcess(spi_driver_cls = SPI_HTPA160x120dR1,
+                                         spi_driver_kwargs = spi_driver_kwargs,
+                                         write_buffer = raw_buffer,
+                                         profile = True,
+                                         profile_every= 50)
+
+    proc_process = SPI_ProcessingProcess(processor_queue = spi_process.processor_queue,
+                                         read_buffer = raw_buffer,
+                                         write_buffer = spi_buffer,
+                                         lut_csv_path = None,
+                                         profile = True,
+                                         profile_every= 50)
 
 
     #%% Create instance of UDP_PickleServerProcess, which sends every frame
@@ -128,6 +141,7 @@ if __name__ == '__main__':
 
     print('Starting processes...')
     spi_process.start()
+    proc_process.start()
     server_process.start()
     print('Processes started.')
 
@@ -145,12 +159,15 @@ if __name__ == '__main__':
     finally:
         # Stop in reverse order regardless of how we exit
         server_process.stop()
+        proc_process.stop()
         spi_process.stop()
 
         spi_process.join()
+        proc_process.join()
         server_process.join()
 
         # Release the shared memory backing the buffers
+        raw_buffer.close()
         spi_buffer.close()
 
         print("All processes stopped.")

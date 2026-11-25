@@ -801,11 +801,15 @@ class SPI_ClientProcess(WProcess_R1):
         # Set time
         self.t0 = time.time()
 
+    def _acquire(self) -> dict:
+        """One frame from the driver; SPI_AcquisitionProcess reads raw ones."""
+        return self.spi_driver.acquire_frame()
+
     def _target(self):
 
         try:
-            # Acquire and process one frame from the sensor
-            data = self.spi_driver.acquire_frame()
+            # Acquire (and process) one frame from the sensor
+            data = self._acquire()
 
         except Exception as e:
             # Print each distinct message once rather than on every
@@ -857,6 +861,169 @@ class SPI_ClientProcess(WProcess_R1):
     def stop(self):
         self._exit.set()
 
+
+class SPI_AcquisitionProcess(SPI_ClientProcess):
+    """
+    First stage of a two-process SPI pipeline: only talks to the sensor.
+
+    SPI_ClientProcess runs conversion, readout, calibration and LuT of a
+    frame one after the other, so the sensor waits while a frame is being
+    processed. This process writes the raw bytes of every frame
+    (SPI_HTPA160x120dR1.acquire_raw(), about 42 kB) into write_buffer and
+    starts the next frame right away; an SPI_ProcessingProcess reading
+    that buffer turns them into frame dictionaries on another core. The
+    frame period becomes the longer of the two stages instead of their sum.
+
+    Only the acquisition process can read the calibration from the flash,
+    so once the device is open it puts a pickled, hardware-free copy of
+    its driver (calibration, LuT, options) into processor_queue, where
+    SPI_ProcessingProcess picks it up::
+
+        acq  = SPI_AcquisitionProcess(SPI_HTPA160x120dR1, kwargs, raw_buffer)
+        proc = SPI_ProcessingProcess(acq.processor_queue, raw_buffer,
+                                     frame_buffer)
+
+    Every item put into write_buffer is the dict of acquire_raw() plus
+    'success' and 'image_id', or {'success': False, ...} like
+    SPI_ClientProcess on a failed frame.
+    """
+
+    def __init__(self,
+                 spi_driver_cls,
+                 spi_driver_kwargs: dict,
+                 write_buffer,
+                 name: str = 'spi_acquisition_process',
+                 **kwargs):
+
+        # Hands the driver over to SPI_ProcessingProcess. Created here, in
+        # the parent, so that both children receive the same queue.
+        self.processor_queue = MPQueue(maxsize=1)
+
+        super().__init__(spi_driver_cls=spi_driver_cls,
+                         spi_driver_kwargs=spi_driver_kwargs,
+                         write_buffer=write_buffer,
+                         lut_csv_path=None,
+                         name=name,
+                         **kwargs)
+
+    def _setup(self):
+        super()._setup()
+
+        # Pickled here rather than by the queue's feeder thread, which would
+        # do it concurrently with the first acquire_raw() calls
+        self.processor_queue.put(pkl.dumps(self.spi_driver,
+                                           protocol=pkl.HIGHEST_PROTOCOL))
+
+        # Do not let this process hang on exit if nobody ever reads it
+        self.processor_queue.cancel_join_thread()
+
+    def _acquire(self) -> dict:
+        return self.spi_driver.acquire_raw()
+
+
+class SPI_ProcessingProcess(RWProcess_R1):
+    """
+    Second stage of a two-process SPI pipeline, see SPI_AcquisitionProcess:
+    reads raw frames from read_buffer and writes the frame dictionaries of
+    hspy.drivers._frame (plus 'success' and 'image_id') into write_buffer -
+    the same items SPI_ClientProcess writes.
+    """
+
+    def __init__(self,
+                 processor_queue,
+                 read_buffer,
+                 write_buffer,
+                 lut_csv_path=None,
+                 name: str = 'spi_processing_process',
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        processor_queue : multiprocessing.Queue
+            SPI_AcquisitionProcess.processor_queue, the driver copy arrives
+            through it.
+        read_buffer : Queue / SharedMemoryQueue
+            The write_buffer of the SPI_AcquisitionProcess.
+        write_buffer : Queue / SharedMemoryQueue
+            Buffer the processed frames are put into.
+        lut_csv_path : str or Path, optional
+            If given, a LuT is loaded from this CSV and replaces the one the
+            driver found for the table number in its flash.
+        name : str
+            Process name.
+        """
+        self.processor_queue = processor_queue
+        self.lut_csv_path = lut_csv_path
+
+        super().__init__(name=name,
+                         read_buffer=read_buffer,
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _setup(self):
+
+        # Ignore Ctrl+C in this process: the parent catches it and calls stop()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        # Wait for the driver copy of the acquisition process. It only
+        # arrives once that process has opened and initialised the sensor.
+        self.spi_processor = None
+        while not self._exit.is_set():
+            try:
+                self.spi_processor = pkl.loads(
+                    self.processor_queue.get(timeout=self.get_timeout))
+                break
+            except queue.Empty:
+                continue
+
+        if self.spi_processor is not None and self.lut_csv_path is not None:
+            lut = LuT()
+            lut.from_csv(self.lut_csv_path)
+            self.spi_processor.LuT = lut
+
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
+    def _target(self):
+
+        item = self._get()
+
+        # A failed acquisition is passed on unchanged
+        if not item.get('success', False):
+            return item
+
+        image_id = item.pop('image_id')
+        del item['success']
+
+        try:
+            data = self.spi_processor.process_raw(item)
+
+        except Exception as e:
+            # Print each distinct message once rather than on every frame
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+
+            result = {'success': False,
+                      'DevID': self.spi_processor.DevID,
+                      'serial': ''}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Processing frames again "
+                      f"({self._n_errors} failed frame(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+
+            result = dict(data)
+            result['success'] = True
+
+        result['image_id'] = image_id
+
+        return result
 
 
 class UDP_PickleServerProcess(RProcess_R1):

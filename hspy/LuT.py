@@ -313,9 +313,12 @@ class LuT:
         # if not Ta_grid.shape == Ud_grid.shape == To_elements.shape:
         #     raise ValueError('Shapes of LuT and created Ta-Ud-grids are not consistent.')
         
-        # Create RegularGridInterpolator
+        # Create RegularGridInterpolator. Query points outside the LuT give
+        # NaN instead of a ValueError for the whole call, see _calc_To()
         interp = RegularGridInterpolator((Ud_elements,Ta_elements),
-                                         To_elements)
+                                         To_elements,
+                                         bounds_error=False,
+                                         fill_value=np.nan)
         
         # Assign to class property
         self.LuTGridInterpolator = interp
@@ -643,12 +646,11 @@ class LuT:
             Ud = qpoints[0]
             Ta = qpoints[1]
             
-            try:
-                To = self.LuTGridInterpolator((Ud,Ta))
-                
-                
-            except ValueError:
-                
+            To = self.LuTGridInterpolator((Ud,Ta))
+
+            # Out of bounds: the interpolator returns NaN
+            if np.isnan(To):
+
                 if not self.LuT.index.values.min() <= Ud <= self.LuT.index.values.max():
                     warn('Queried Ud value is out of bounds. To=-1 returned.\n')
                     To = -1
@@ -670,17 +672,11 @@ class LuT:
                                  '[(Ud_0,Tamb0_0),..., (Ud_N,Tamb0_N)] with ' +\
                                      'N: number of query points.')
                     
-            try:
-                # Try to evaluate whole array in one go
-                To = self.LuTGridInterpolator(qpoints)
-            
-            except ValueError:
-                # If only one query point is out of bounds, a ValueError is 
-                 # returned. In that case, try to evalute point by point
-                To = []
-                for qpoint in qpoints:
-                    To.append(self._calc_To(tuple(qpoint)))
-            
+            # Evaluate the whole array in one go. Query points outside the
+            # LuT come back as NaN and are marked with To = +1
+            To = self.LuTGridInterpolator(qpoints)
+            To[np.isnan(To)] = 1
+
             return To
         
 

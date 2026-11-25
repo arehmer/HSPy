@@ -307,9 +307,8 @@ def test_the_raw_payload_still_fits_a_slot():
 
     n = 120 * 160
 
-    raw = {'pix_raw': {block: {'top': b'\x00' * 1606, 'bot': b'\x00' * 1606}
-                       for block in range(12)},
-           'eloff_raw': {'top': b'\x00' * 1606, 'bot': b'\x00' * 1606}}
+    raw = {'pix_raw': np.zeros((12, 2, 1607), dtype=np.uint8),
+           'eloff_raw': np.zeros((2, 1607), dtype=np.uint8)}
 
     frame = _frame(interface='spi',
                    shape=(120, 160),
