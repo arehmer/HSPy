@@ -74,26 +74,14 @@ arg_parser.add_argument("--target_port",
                         help="Port the peer's UDP_PickleClient(Process) is listening on.")
 
 # Returns a callable that drives the GPIO pin to enable/disable the EEPROM on the HTPA board
-def make_ee_enable(pin: int = 8):
-    """
-    Return an ee_enable(level) callable for SPI_HTPA160x120dR1, driving
-    BCM GPIO `pin`. Raises RuntimeError with a clear message on machines
-    without gpiozero or without GPIO hardware.
-    """
-    if not _GPIOZERO_AVAILABLE:
-        raise RuntimeError("gpiozero is not installed. Run: pip install gpiozero")
-    try:
-        ee = DigitalOutputDevice(pin, initial_value=True)   # idle HIGH
-    except BadPinFactory as e:
-        raise RuntimeError(
-            "No GPIO hardware found: gpiozero only drives pins on a "
-            "Raspberry Pi (or with a mock pin factory for testing)."
-        ) from e
-
+import lgpio
+def make_ee_enable(pin: int = 8, chip: int = 0):
+    h = lgpio.gpiochip_open(chip)
+    lgpio.gpio_claim_output(h, pin, 1)           # idle HIGH
+    write = lgpio.gpio_write
     def ee_enable(level: bool) -> None:
-        ee.value = level
-
-    ee_enable.device = ee        # keep a handle, e.g. for ee_enable.device.close()
+        write(h, pin, level)
+    ee_enable.handle = h
     return ee_enable
 
 # %% Parse arguments
