@@ -41,9 +41,13 @@ except ImportError:
     _GPIOZERO_AVAILABLE = False
 
 from hspy.ipc.threads import (SPI_AcquisitionThread, SPI_ProcessingThread,
-                              UDP_PickleServer)
+                              UDP_PickleServer, RThread_R1)
 from hspy.drivers.spi import SPI_HTPA160x120dR1
 
+# db
+import sys
+sys.setswitchinterval(0.0005)
+# /db
 
 # %% Create an argument parser to enable passing argument from the
 # command line to this script
@@ -122,26 +126,36 @@ if __name__ == '__main__':
                                        profile = True,
                                        profile_every= 50)
 
-    proc_thread = SPI_ProcessingThread(spi_driver = spi_driver,
-                                       read_buffer = raw_buffer,
-                                       write_buffer = spi_buffer,
-                                       lut_csv_path = None,
-                                       profile = True,
-                                       profile_every= 50)
+    class consumer_thread(RThread_R1):
+        def __init__(self, name, read_buffer):
+            super().__init__(name=name,
+                             read_buffer=read_buffer)
+            
+
+        def _target(self):
+            data = self.read_buffer._get()
+
+    # proc_thread = SPI_ProcessingThread(spi_driver = spi_driver,
+    #                                    read_buffer = raw_buffer,
+    #                                    write_buffer = spi_buffer,
+    #                                    lut_csv_path = None,
+    #                                    profile = True,
+    #                                    profile_every= 50)
 
     #%% Create instance of UDP_PickleServer, which sends every frame from
     # the processing thread to the peer
-    server_thread = UDP_PickleServer(name='udp_pickle_server_thread',
-                                     read_buffer=spi_buffer,
-                                     target_ip=target_ip,
-                                     target_port=target_port,
-                                     profile = True,
-                                     profile_every= 50)
+    # server_thread = UDP_PickleServer(name='udp_pickle_server_thread',
+    #                                  read_buffer=spi_buffer,
+    #                                  target_ip=target_ip,
+    #                                  target_port=target_port,
+    #                                  profile = True,
+    #                                  profile_every= 50)
 
     print('Starting threads...')
     spi_thread.start()
-    proc_thread.start()
-    server_thread.start()
+    consumer_thread.start()
+    #proc_thread.start()
+    #server_thread.start()
     print('Threads started.')
 
 
@@ -157,13 +171,17 @@ if __name__ == '__main__':
 
     finally:
         # Stop in reverse order regardless of how we exit
-        server_thread.stop()
-        proc_thread.stop()
+        
+        
+        #server_thread.stop()
+        #proc_thread.stop()
+        consumer_thread.stop()
         spi_thread.stop()
 
         spi_thread.join()
-        proc_thread.join()
-        server_thread.join()
+        consumer_thread.join()
+        #proc_thread.join()
+        #server_thread.join()
 
         # The driver belongs to this script: put the sensor to sleep and
         # release the SPI device
