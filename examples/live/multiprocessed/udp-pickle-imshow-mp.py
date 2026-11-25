@@ -59,7 +59,7 @@ arg_parser.add_argument("--listen_ip",
 arg_parser.add_argument("--listen_port",
                         dest="listen_port",
                         type=int,
-                        required=True,
+                        default='5005',
                         help="Local port to listen on. Must match --target_port passed to the peer's spi-udp-mp.py.")
 
 arg_parser.add_argument("--arraytype",
