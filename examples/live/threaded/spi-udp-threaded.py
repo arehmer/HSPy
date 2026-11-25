@@ -129,27 +129,27 @@ if __name__ == '__main__':
     consumer_thread = ConsumerThread(name='consumer_thread',
                                      read_buffer=raw_buffer)   
 
-    # proc_thread = SPI_ProcessingThread(spi_driver = spi_driver,
-    #                                    read_buffer = raw_buffer,
-    #                                    write_buffer = spi_buffer,
-    #                                    lut_csv_path = None,
-    #                                    profile = True,
-    #                                    profile_every= 50)
+    proc_thread = SPI_ProcessingThread(spi_driver = spi_driver,
+                                       read_buffer = raw_buffer,
+                                       write_buffer = spi_buffer,
+                                       lut_csv_path = None,
+                                       profile = True,
+                                       profile_every= 50)
 
     #%% Create instance of UDP_PickleServer, which sends every frame from
     # the processing thread to the peer
-    # server_thread = UDP_PickleServer(name='udp_pickle_server_thread',
-    #                                  read_buffer=spi_buffer,
-    #                                  target_ip=target_ip,
-    #                                  target_port=target_port,
-    #                                  profile = True,
-    #                                  profile_every= 50)
+    server_thread = UDP_PickleServer(name='udp_pickle_server_thread',
+                                     read_buffer=spi_buffer,
+                                     target_ip=target_ip,
+                                     target_port=target_port,
+                                     profile = True,
+                                     profile_every= 50)
 
     print('Starting threads...')
     spi_thread.start()
-    consumer_thread.start()
-    #proc_thread.start()
-    #server_thread.start()
+    #consumer_thread.start()
+    proc_thread.start()
+    server_thread.start()
     print('Threads started.')
 
 
@@ -167,15 +167,15 @@ if __name__ == '__main__':
         # Stop in reverse order regardless of how we exit
         
         
-        #server_thread.stop()
-        #proc_thread.stop()
-        consumer_thread.stop()
+        server_thread.stop()
+        proc_thread.stop()
+        #consumer_thread.stop()
         spi_thread.stop()
 
         spi_thread.join()
-        consumer_thread.join()
-        #proc_thread.join()
-        #server_thread.join()
+        #consumer_thread.join()
+        proc_thread.join()
+        server_thread.join()
 
         # The driver belongs to this script: put the sensor to sleep and
         # release the SPI device
