@@ -25,7 +25,9 @@ import pickle as pkl
 
 from collections import deque
 
-from hspy.ipc.threads_base import WThread_R1, RThread, RThread_R1, WThread, RWThread
+from hspy.ipc.threads_base import (WThread_R1, RThread, RThread_R1, WThread,
+                                   RWThread, RWThread_R1)
+from hspy.LuT import LuT
 from hspy.tparray import TPArray
 
 from hspy.drivers._frame import AUX_FROM_DATACOLS
@@ -596,11 +598,15 @@ class SPI_Client(WThread_R1):
         # Set time
         self.t0 = time.time()
 
+    def _acquire(self) -> dict:
+        """One frame from the driver; SPI_AcquisitionThread reads raw ones."""
+        return self.spi_driver.acquire_frame()
+
     def _target(self):
 
         try:
             # Acquire and process one frame from the sensor
-            data = self.spi_driver.acquire_frame()
+            data = self._acquire()
 
         except Exception as e:
             # Print each distinct message once rather than on every
@@ -642,6 +648,134 @@ class SPI_Client(WThread_R1):
         # belongs to whoever created the driver (same ownership as with
         # USB_Client).
         pass
+
+
+class SPI_AcquisitionThread(SPI_Client):
+    """
+    Threading version of SPI_AcquisitionProcess: first stage of a two-stage
+    SPI pipeline that only talks to the sensor.
+
+    Writes the raw bytes of every frame (SPI_HTPA160x120dR1.acquire_raw(),
+    about 42 kB) into write_buffer and starts the next frame right away; an
+    SPI_ProcessingThread reading that buffer turns them into frame
+    dictionaries. The SPI transfers and the sleeps during a conversion
+    release the GIL, so processing frame k overlaps acquiring frame k+1::
+
+        acq  = SPI_AcquisitionThread(spi_driver, raw_buffer)
+        proc = SPI_ProcessingThread(spi_driver, raw_buffer, frame_buffer)
+
+    Every item put into write_buffer is the dict of acquire_raw() plus
+    'success' and 'image_id', or {'success': False, ...} like SPI_Client on
+    a failed frame.
+    """
+
+    def __init__(self,
+                 spi_driver: SPI_HTPA160x120dR1,
+                 write_buffer: Queue,
+                 name: str = 'spi_acquisition_thread',
+                 **kwargs):
+
+        super().__init__(spi_driver=spi_driver,
+                         write_buffer=write_buffer,
+                         name=name,
+                         **kwargs)
+
+    def _acquire(self) -> dict:
+        return self.spi_driver.acquire_raw()
+
+
+class SPI_ProcessingThread(RWThread_R1):
+    """
+    Threading version of SPI_ProcessingProcess: second stage of a two-stage
+    SPI pipeline, see SPI_AcquisitionThread. Reads raw frames from
+    read_buffer and writes the frame dictionaries of hspy.drivers._frame
+    (plus 'success' and 'image_id') into write_buffer - the same items
+    SPI_Client writes.
+    """
+
+    def __init__(self,
+                 spi_driver: SPI_HTPA160x120dR1,
+                 read_buffer: Queue,
+                 write_buffer: Queue,
+                 lut_csv_path=None,
+                 name: str = 'spi_processing_thread',
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        spi_driver : SPI_HTPA160x120dR1
+            The open driver the SPI_AcquisitionThread uses. This thread
+            works on a hardware-free copy of it (calibration, LuT,
+            options), made here, so the two threads share no driver state.
+        read_buffer : Queue
+            The write_buffer of the SPI_AcquisitionThread.
+        write_buffer : Queue
+            Buffer the processed frames are put into.
+        lut_csv_path : str or Path, optional
+            If given, a LuT is loaded from this CSV and replaces the one the
+            driver found for the table number in its flash.
+        name : str
+            Thread name.
+        """
+
+        # Same copy SPI_AcquisitionProcess sends to SPI_ProcessingProcess
+        # (__getstate__ leaves out the SPI handle and the GPIO callable)
+        self.spi_processor = pkl.loads(pkl.dumps(spi_driver,
+                                                 protocol=pkl.HIGHEST_PROTOCOL))
+
+        if lut_csv_path is not None:
+            lut = LuT()
+            lut.from_csv(lut_csv_path)
+            self.spi_processor.LuT = lut
+
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
+        super().__init__(name=name,
+                         read_buffer=read_buffer,
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _target(self):
+
+        item = self._get()
+
+        # A failed acquisition is passed on unchanged
+        if not item.get('success', False):
+            return item
+
+        image_id = item.pop('image_id')
+        del item['success']
+
+        try:
+            data = self.spi_processor.process_raw(item)
+
+        except Exception as e:
+            # Print each distinct message once rather than on every frame
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+
+            result = {'success': False,
+                      'DevID': self.spi_processor.DevID,
+                      'serial': ''}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Processing frames again "
+                      f"({self._n_errors} failed frame(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+
+            result = dict(data)
+            result['success'] = True
+
+        result['image_id'] = image_id
+
+        return result
 
 
 

@@ -47,7 +47,7 @@ import time
 # imports from this module keep working.
 
 from hspy.ipc.misc import (_ProfileStat, _print_profile_report,
-                           _new_write_profile, _new_read_profile,
+                           write_profile, read_profile,
                            drop_oldest_put, _GET_TIMEOUT_S)
 
 
@@ -281,7 +281,7 @@ class WProcess_R1(Process):
             self._exit.set()
 
         if self.profile:
-            prof = _new_write_profile()
+            prof = write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -391,7 +391,7 @@ class RProcess_R1(Process):
         self._setup()
 
         if self.profile:
-            prof = _new_read_profile()
+            prof = read_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -509,7 +509,7 @@ class RWProcess_R1(Process):
         self._setup()
 
         if self.profile:
-            prof = _new_write_profile()
+            prof = write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
