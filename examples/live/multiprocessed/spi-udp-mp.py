@@ -52,6 +52,7 @@ arg_parser.add_argument("--target_port",
                         dest="target_port",
                         type=int,
                         required=True,
+                        default = 5005,
                         help="Port the peer's UDP_PickleClient(Process) is listening on.")
 
 # Returns a callable that drives the GPIO pin to enable/disable the EEPROM on the HTPA board
