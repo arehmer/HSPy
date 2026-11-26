@@ -27,7 +27,10 @@ Under the real load of spi-udp-threaded.py, at normal and at real-time
 priority of the acquisition thread:
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20
-python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --no_warmup --no_early
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --no_warmup
+
+The same with the acquisition in a process of its own (spi-udp-mp.py):
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --process
 
 Analyse a recording again, e.g. on the PC:
 python ./SPI_FlickerTest.py --analyze flicker_e8_g50.npz
@@ -51,18 +54,25 @@ Command-line Arguments
 --target_port : int (default 5005)
     Port of that peer.
 --rt_priority : int (optional)
-    With --pipeline: SCHED_FIFO priority of the acquisition thread (see
+    With --pipeline: SCHED_FIFO priority of the acquisition thread or
+    process (see
     spi-udp-threaded.py for the one-time setup). Default: normal priority.
 --no_warmup : flag
     Switch off the driver's warm-up conversion of block 0 in front of
     every frame (SPI_HTPA160x120dR1(warmup=...), on by default).
---no_early : flag
-    Switch off the driver's early start of the next frame's first
-    conversion (SPI_HTPA160x120dR1(early_start=...), on by default).
+--early : flag
+    Switch on the driver's early start of the next frame's first
+    conversion (SPI_HTPA160x120dR1(early_start=...), off by default).
+--process : flag
+    With --pipeline: run the pipeline of spi-udp-mp.py instead, i.e.
+    acquisition (at --rt_priority), processing and UDP server each in a
+    process of its own. The acquisition then has a GIL of its own. Needs
+    the 'fork' start method of multiprocessing (Linux default up to
+    Python 3.13), as spi-udp-mp.py does.
 --out : str (optional)
     File the recording is saved to (default flicker_e<n>_g<ms>.npz or
-    flicker_e<n>_pipe_rt<priority>.npz, followed by _w<0|1>e<0|1> for
-    warm-up and early start).
+    flicker_e<n>_pipe_rt<priority>.npz or flicker_e<n>_proc_rt<priority>.npz,
+    followed by _w<0|1>e<0|1> for warm-up and early start).
 --analyze : str (optional)
     Skip recording, only analyse this .npz file.
 """
@@ -73,6 +83,8 @@ import random
 import time
 
 import numpy as np
+
+from hspy.ipc.processes import SPI_AcquisitionProcess
 
 _BLOCKS = 12
 _ROWS, _COLS = 120, 160
@@ -123,6 +135,94 @@ def make_ee_enable(pin: int = 8, chip: int = 0):
     return ee_enable
 
 
+class Recorder:
+    """
+    Records with driver d: wraps d._write_register to time stamp every
+    conversion START, grab() runs one acquire_raw() and keeps its raw bytes
+    and timing, result() converts everything and restores d. Lives in the
+    thread or process that acquires.
+    """
+
+    def __init__(self, d):
+        from hspy.drivers.spi.drivers import _CMD_CONFIG, _BIT_START, _BIT_BLIND
+        self.d = d
+        self.starts = []        # (perf_counter, BLIND bit set) of every START
+        self.raws, self.gap, self.dt_blocks, self.phase = [], [], [], []
+        self.intervals = []     # START-to-START before each of the 12 blocks
+        self.first_gap = []     # START-to-START before the warm-up
+        self.rt_actual = None   # real-time priority the acquiring thread got
+
+        self._write_register = write_register = d._write_register
+        starts = self.starts
+
+        def logged_write_register(cmd, value):
+            if cmd == _CMD_CONFIG and value & _BIT_START:
+                starts.append((time.perf_counter(), bool(value & _BIT_BLIND)))
+            write_register(cmd, value)
+
+        d._write_register = logged_write_register
+
+    def grab(self) -> dict:
+        """One acquire_raw() plus its timing; returns the raw frame."""
+        d, starts = self.d, self.starts
+        if self.rt_actual is None:
+            fifo = (hasattr(os, 'sched_getscheduler')
+                    and os.sched_getscheduler(0) == os.SCHED_FIFO)
+            self.rt_actual = os.sched_getparam(0).sched_priority if fifo else -1
+        first = len(starts)
+        # The first conversion of this frame was already started at the
+        # end of the previous one (early start)
+        pending = d._t_next is not None
+        raw = d.acquire_raw()
+        self.phase.append(d._n_since_eloff)      # 1 = fresh eloff this frame
+
+        # START indices of this frame's conversions without BLIND: the
+        # warm-up (if on) and blocks 0..11
+        idx = [i for i in range(first, len(starts)) if not starts[i][1]]
+        if d._t_next is not None:
+            idx = idx[:-1]          # already the next frame's first START
+        if pending:
+            idx = [first - 1] + idx
+        prev = starts[idx[0] - 1][0] if idx[0] > 0 else np.nan
+        iv = np.diff([prev] + [starts[i][0] for i in idx])
+        self.first_gap.append(iv[0])
+        if d.warmup:
+            iv = iv[1:]             # from the warm-up to block 0, ...
+        self.gap.append(iv[0])
+        self.dt_blocks.append(np.median(iv[1:]))
+        self.intervals.append(list(iv))
+        self.raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
+        return raw
+
+    def result(self, n_frames: int, **mode) -> dict:
+        """Restore d, convert the recording (after recording, so that it
+        adds no load) and return it plus the keyword arguments in mode."""
+        d = self.d
+        d._write_register = self._write_register
+        n = min(n_frames, len(self.raws))
+        pix, eloff, ptat, vdd = [], [], [], []
+        for pix_raw, eloff_raw in self.raws[:n]:
+            data = d.convert_spi_data({'pix_raw': pix_raw, 'eloff_raw': eloff_raw})
+            pix.append(data['pix'].copy())
+            eloff.append(data['eloff'].copy())
+            ptat.append(data['ptat'].copy())
+            vdd.append(data['vdd'].copy())
+
+        return dict(pix=np.array(pix), eloff=np.array(eloff),
+                    ptat=np.array(ptat), vdd=np.array(vdd),
+                    gap_ms=np.array(self.gap[:n]) * 1e3,
+                    dt_blocks_ms=np.array(self.dt_blocks[:n]) * 1e3,
+                    interval_ms=np.array(self.intervals[:n]) * 1e3,
+                    first_ms=np.array(self.first_gap[:n]) * 1e3,
+                    phase=np.array(self.phase[:n]), eloff_every=d.eloff_every,
+                    rt_priority=-1 if self.rt_actual is None else self.rt_actual,
+                    warmup=d.warmup, early=d.early_start,
+                    # digits -> compensated signal per pixel, 1 / sensitivity
+                    # (Section 15.5); shows what the noise means in the image
+                    scale=np.asarray(d._calib["scale"]),
+                    **mode)
+
+
 def record(d, n_frames: int, gap_ms: float = 0.0,
            target: tuple = None, rt_priority: int = None) -> dict:
     """
@@ -134,8 +234,6 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
     with the acquisition thread at rt_priority; gap_ms is ignored.
     Warm-up and early start are whatever the driver d is set to.
     """
-    from hspy.drivers.spi.drivers import _CMD_CONFIG, _BIT_START, _BIT_BLIND
-
     if target is not None:
         import sys
         from queue import Queue
@@ -143,7 +241,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                                       SPI_ProcessingThread, UDP_PickleServer)
         sys.setswitchinterval(0.0005)            # as in spi-udp-threaded.py
         raw_buffer, spi_buffer = Queue(maxsize=4), Queue(maxsize=4)
-        # Created before d._write_register is wrapped below: it works on a
+        # Created before Recorder wraps d._write_register: it works on a
         # pickled copy of d, and the wrapper cannot be pickled
         proc_thread = SPI_ProcessingThread(spi_driver=d,
                                            read_buffer=raw_buffer,
@@ -153,63 +251,17 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                                          target_ip=target[0],
                                          target_port=target[1])
 
-    # Time stamp every conversion START: (perf_counter, BLIND bit set)
-    starts = []
-    write_register = d._write_register
-
-    def logged_write_register(cmd, value):
-        if cmd == _CMD_CONFIG and value & _BIT_START:
-            starts.append((time.perf_counter(), bool(value & _BIT_BLIND)))
-        write_register(cmd, value)
-
-    d._write_register = logged_write_register
-
-    # One acquire_raw() plus its timing; runs in the acquiring thread
-    raws, gap, dt_blocks, phase = [], [], [], []
-    intervals = []          # START-to-START before each of the 12 blocks
-    first_gap = []          # START-to-START before the warm-up
-    rt_actual = []          # real-time priority the acquiring thread got
-
-    def grab() -> dict:
-        if not rt_actual:
-            fifo = (hasattr(os, 'sched_getscheduler')
-                    and os.sched_getscheduler(0) == os.SCHED_FIFO)
-            rt_actual.append(os.sched_getparam(0).sched_priority if fifo else -1)
-        first = len(starts)
-        # The first conversion of this frame was already started at the
-        # end of the previous one (early start)
-        pending = d._t_next is not None
-        raw = d.acquire_raw()
-        phase.append(d._n_since_eloff)           # 1 = fresh eloff this frame
-
-        # START indices of this frame's conversions without BLIND: the
-        # warm-up (if on) and blocks 0..11
-        idx = [i for i in range(first, len(starts)) if not starts[i][1]]
-        if d._t_next is not None:
-            idx = idx[:-1]          # already the next frame's first START
-        if pending:
-            idx = [first - 1] + idx
-        prev = starts[idx[0] - 1][0] if idx[0] > 0 else np.nan
-        iv = np.diff([prev] + [starts[i][0] for i in idx])
-        first_gap.append(iv[0])
-        if d.warmup:
-            iv = iv[1:]             # from the warm-up to block 0, ...
-        gap.append(iv[0])
-        dt_blocks.append(np.median(iv[1:]))
-        intervals.append(list(iv))
-        raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
-        return raw
-
+    rec = Recorder(d)
     try:
         if target is None:
             for i in range(n_frames):
-                grab()
+                rec.grab()
                 if gap_ms > 0:
                     time.sleep(random.uniform(0, gap_ms) * 1e-3)
         else:
             class RecordingAcquisitionThread(SPI_AcquisitionThread):
                 def _acquire(self):
-                    return grab()
+                    return rec.grab()
 
             spi_thread = RecordingAcquisitionThread(spi_driver=d,
                                                     write_buffer=raw_buffer,
@@ -218,7 +270,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
             for t in threads:
                 t.start()
             try:
-                while len(raws) < n_frames and spi_thread.is_alive():
+                while len(rec.raws) < n_frames and spi_thread.is_alive():
                     time.sleep(0.2)
             finally:
                 for t in reversed(threads):
@@ -226,32 +278,93 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                 for t in threads:
                     t.join()
     finally:
-        d._write_register = write_register
+        r = rec.result(n_frames,
+                       gap_max_ms=gap_ms if target is None else np.nan,
+                       pipeline=target is not None, process=False)
+    return r
 
-    # Convert after the recording, so that it adds no load while recording
-    n = min(n_frames, len(raws))
-    pix, eloff, ptat, vdd = [], [], [], []
-    for pix_raw, eloff_raw in raws[:n]:
-        data = d.convert_spi_data({'pix_raw': pix_raw, 'eloff_raw': eloff_raw})
-        pix.append(data['pix'].copy())
-        eloff.append(data['eloff'].copy())
-        ptat.append(data['ptat'].copy())
-        vdd.append(data['vdd'].copy())
 
-    return dict(pix=np.array(pix), eloff=np.array(eloff),
-                ptat=np.array(ptat), vdd=np.array(vdd),
-                gap_ms=np.array(gap[:n]) * 1e3,
-                dt_blocks_ms=np.array(dt_blocks[:n]) * 1e3,
-                interval_ms=np.array(intervals[:n]) * 1e3,
-                first_ms=np.array(first_gap[:n]) * 1e3,
-                phase=np.array(phase[:n]), eloff_every=d.eloff_every,
-                gap_max_ms=gap_ms if target is None else np.nan,
-                pipeline=target is not None,
-                rt_priority=rt_actual[0] if rt_actual else -1,
-                warmup=d.warmup, early=d.early_start,
-                # digits -> compensated signal per pixel, 1 / sensitivity
-                # (Section 15.5); shows what the noise means in the image
-                scale=np.asarray(d._calib["scale"]))
+class RecordingAcquisitionProcess(SPI_AcquisitionProcess):
+    """
+    SPI_AcquisitionProcess that records with a Recorder inside the child
+    process, sets the event done once n_frames are recorded and, when
+    stopped, saves the recording to out_path.
+    """
+
+    def __init__(self, n_frames: int, out_path: str, done, **kwargs):
+        self.n_frames, self.out_path, self.done = n_frames, out_path, done
+        super().__init__(**kwargs)
+
+    def _setup(self):
+        super()._setup()        # hands the unwrapped driver to processing
+        self.recorder = Recorder(self.spi_driver)
+
+    def _acquire(self) -> dict:
+        raw = self.recorder.grab()
+        if len(self.recorder.raws) >= self.n_frames:
+            self.done.set()
+        return raw
+
+    def _teardown(self):
+        recorder = getattr(self, 'recorder', None)
+        if recorder is not None:
+            np.savez(self.out_path, **recorder.result(
+                self.n_frames, gap_max_ms=np.nan, pipeline=True, process=True))
+        super()._teardown()
+
+
+def record_process(driver_cls, driver_kwargs: dict, n_frames: int,
+                   target: tuple, rt_priority: int = None) -> dict:
+    """
+    Record n_frames like record(target=...), but in the process pipeline
+    of spi-udp-mp.py: acquisition (at rt_priority), processing and UDP
+    server each in a process of its own. The driver is built from
+    driver_cls(**driver_kwargs) inside the acquisition process.
+    """
+    import tempfile
+    from multiprocessing import Event
+    from hspy.ipc.processes_base import SharedMemoryQueue
+    from hspy.ipc.processes import SPI_ProcessingProcess, UDP_PickleServerProcess
+
+    # As in spi-udp-mp.py
+    raw_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=256 * 1024)
+    spi_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=4 * 1024 * 1024)
+    done = Event()
+    out_dir = tempfile.mkdtemp()
+    out_path = os.path.join(out_dir, 'recording.npz')
+
+    acq = RecordingAcquisitionProcess(n_frames=n_frames, out_path=out_path,
+                                      done=done,
+                                      spi_driver_cls=driver_cls,
+                                      spi_driver_kwargs=driver_kwargs,
+                                      write_buffer=raw_buffer,
+                                      rt_priority=rt_priority)
+    proc = SPI_ProcessingProcess(processor_queue=acq.processor_queue,
+                                 read_buffer=raw_buffer,
+                                 write_buffer=spi_buffer)
+    server = UDP_PickleServerProcess(name='udp_pickle_server_process',
+                                     read_buffer=spi_buffer,
+                                     target_ip=target[0],
+                                     target_port=target[1])
+    processes = (acq, proc, server)
+    for p in processes:
+        p.start()
+    try:
+        while not done.wait(0.2) and acq.is_alive():
+            pass
+    finally:
+        for p in reversed(processes):
+            p.stop()
+        for p in processes:
+            p.join()
+        raw_buffer.close()
+        spi_buffer.close()
+
+    with np.load(out_path) as f:
+        r = dict(f)
+    os.remove(out_path)
+    os.rmdir(out_dir)
+    return r
 
 
 def analyze(r) -> None:
@@ -263,7 +376,9 @@ def analyze(r) -> None:
 
     if 'pipeline' in getattr(r, 'files', r) and r['pipeline']:
         rt = int(r['rt_priority'])
-        mode = (f"threaded pipeline, acquisition priority "
+        kind = ('process pipeline' if 'process' in getattr(r, 'files', r)
+                and r['process'] else 'threaded pipeline')
+        mode = (f"{kind}, acquisition priority "
                 f"{'normal' if rt < 0 else f'SCHED_FIFO {rt}'}")
     else:
         mode = f"extra gap 0..{float(r['gap_max_ms']):.0f} ms"
@@ -434,7 +549,8 @@ if __name__ == '__main__':
     p.add_argument('--target_port', type=int, default=5005)
     p.add_argument('--rt_priority', type=int, default=None)
     p.add_argument('--no_warmup', action='store_true')
-    p.add_argument('--no_early', action='store_true')
+    p.add_argument('--early', action='store_true')
+    p.add_argument('--process', action='store_true')
     p.add_argument('--out', type=str, default=None)
     p.add_argument('--analyze', type=str, default=None)
     args = p.parse_args()
@@ -443,21 +559,28 @@ if __name__ == '__main__':
         analyze(np.load(args.analyze))
     else:
         from hspy.drivers.spi import SPI_HTPA160x120dR1
-        d = SPI_HTPA160x120dR1(bus=args.bus, device=0,
-                               ee_enable=make_ee_enable(pin=8),
-                               eloff_every=args.eloff_every,
-                               warmup=not args.no_warmup,
-                               early_start=not args.no_early)
         target = (args.pipeline, args.target_port) if args.pipeline else None
-        try:
-            r = record(d, args.frames, args.gap_ms, target, args.rt_priority)
-        finally:
-            d.close()
+        if args.process and target is None:
+            p.error('--process needs --pipeline')
+        kwargs = dict(bus=args.bus, device=0,
+                      ee_enable=make_ee_enable(pin=8),
+                      eloff_every=args.eloff_every,
+                      warmup=not args.no_warmup,
+                      early_start=args.early)
+        if args.process:
+            r = record_process(SPI_HTPA160x120dR1, kwargs, args.frames,
+                               target, args.rt_priority)
+        else:
+            d = SPI_HTPA160x120dR1(**kwargs)
+            try:
+                r = record(d, args.frames, args.gap_ms, target, args.rt_priority)
+            finally:
+                d.close()
         if target:
-            name = f"pipe_rt{args.rt_priority or 0}"
+            name = f"{'proc' if args.process else 'pipe'}_rt{args.rt_priority or 0}"
         else:
             name = f"g{args.gap_ms:g}"
-        name += f"_w{int(not args.no_warmup)}e{int(not args.no_early)}"
+        name += f"_w{int(not args.no_warmup)}e{int(args.early)}"
         out = args.out or f"flicker_e{args.eloff_every}_{name}.npz"
         np.savez_compressed(out, **r)
         print(f"Saved {out}")

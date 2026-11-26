@@ -51,6 +51,7 @@ and are frequently required e.g. together with CUDA). So sockets are also
 created inside _setup(), never in __init__.
 """
 
+import os
 import time
 import socket
 import struct
@@ -739,6 +740,7 @@ class SPI_ClientProcess(WProcess_R1):
                  write_buffer,
                  lut_csv_path=None,
                  name: str = 'spi_process',
+                 rt_priority: Optional[int] = None,
                  **kwargs):
         """
         Parameters
@@ -759,6 +761,17 @@ class SPI_ClientProcess(WProcess_R1):
             driver inside _setup().
         name : str
             Process name.
+        rt_priority : int, optional
+            Real-time priority (SCHED_FIFO, 1..99) of this process, set
+            inside it. Keep it below 50, the priority of the kernel's
+            threaded interrupt handlers. A process of its own has its own
+            GIL, so neither the scheduler nor other Python threads can
+            delay a conversion START: the time between conversions stays
+            constant, which keeps block 0 (the top and bottom rows) from
+            flickering. Needs the permission, e.g. a line
+            '<user> - rtprio 50' in /etc/security/limits.d/; without it a
+            warning is printed and the process runs at normal priority.
+            None (default): normal priority.
 
         Returns
         -------
@@ -766,6 +779,7 @@ class SPI_ClientProcess(WProcess_R1):
 
         """
 
+        self.rt_priority = rt_priority
         self.spi_driver_cls = spi_driver_cls
         self.spi_driver_kwargs = spi_driver_kwargs
 
@@ -781,6 +795,17 @@ class SPI_ClientProcess(WProcess_R1):
         # stop(), so that the loop ends between two frames rather than in
         # the middle of a bus transaction.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        # Runs inside the child process: pid 0 is its calling thread
+        if self.rt_priority is not None:
+            try:
+                os.sched_setscheduler(0, os.SCHED_FIFO,
+                                      os.sched_param(self.rt_priority))
+            except (AttributeError, OSError) as e:
+                print(f"[{self.name}] Could not set real-time priority "
+                      f"{self.rt_priority} ({e}); running at normal "
+                      f"priority. Conversion timing and thus the top and "
+                      f"bottom rows may jitter.")
 
         # Opens the SPI device here, inside the child process.
         # SPI_HTPA160x120dR1.__init__ already calls open() + init() itself.

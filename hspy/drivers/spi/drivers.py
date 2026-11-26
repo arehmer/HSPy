@@ -279,7 +279,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         timeout_factor: float = 4.0,
         eloff_every: int = 1,
         warmup: bool = True,
-        early_start: bool = True,
+        early_start: bool = False,
         applyCalib: bool = True,
         keep_raw: bool = False,
         DevID: int = -1,
@@ -325,14 +325,17 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                          own block, which makes the top and bottom rows
                          flicker. Costs one block conversion (~10 ms) per
                          frame.
-        early_start    : if True (default), acquire_raw() starts the first
-                         conversion of the next frame (the warm-up, or block
-                         0) right after the last conversion of a frame has
-                         been read, so that the time from START to START is
-                         the same for every conversion, across the frame
-                         boundary too. The next read_frame() then only waits
-                         for it. The sensor is left converting between two
-                         calls; close() and sleep() end that.
+        early_start    : if True, acquire_raw() starts the first conversion
+                         of the next frame (the warm-up, or block 0) right
+                         after the last conversion of a frame has been read.
+                         The next read_frame() then only waits for it. The
+                         sensor is left converting between two calls;
+                         close() and sleep() end that. Off by default: it
+                         saves ~3 ms per frame, but a late return of the
+                         caller then delays the second conversion of the
+                         frame, i.e. block 0 after the warm-up, whose
+                         offset depends on that delay. Without it, the
+                         delay falls before the discarded warm-up.
         applyCalib     : apply the flash calibration, i.e. produce
                          frame['pix_comp']
         keep_raw       : if True, every frame carries the raw SPI bytes and
