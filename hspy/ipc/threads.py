@@ -4,6 +4,7 @@ Created on Thu Feb  8 16:13:39 2024
 
 @author: rehmer
 """
+import os
 import time
 import cv2
 import socket
@@ -558,6 +559,7 @@ class SPI_Client(WThread_R1):
                  spi_driver: SPI_HTPA160x120dR1,
                  write_buffer: Queue,
                  name: str = 'spi_thread',
+                 rt_priority: Optional[int] = None,
                  **kwargs):
         """
         Parameters
@@ -572,6 +574,16 @@ class SPI_Client(WThread_R1):
             thread to consume.
         name : str
             Thread name.
+        rt_priority : int, optional
+            If given, this thread (and only this one) runs with the Linux
+            real-time policy SCHED_FIFO at this priority (1..99; keep it
+            below 50, the priority of the kernel's threaded interrupts).
+            It then gets the CPU as soon as a conversion wait ends, which
+            keeps the time between conversion STARTs constant: a varying
+            idle time before a conversion shifts the following blocks
+            (flicker of the top and bottom rows). Needs permission, e.g. a
+            line '<user> - rtprio 50' in /etc/security/limits.d/; without
+            it a warning is printed and the thread runs at normal priority.
 
         Returns
         -------
@@ -581,12 +593,25 @@ class SPI_Client(WThread_R1):
 
         # Set SPI driver object as attribute
         self.spi_driver = spi_driver
+        self.rt_priority = rt_priority
 
         super().__init__(name=name,
                          write_buffer=write_buffer,
                          **kwargs)
 
     def _setup(self):
+
+        # Runs inside this thread: on Linux, pid 0 is the calling thread,
+        # so only this thread becomes real-time
+        if self.rt_priority is not None:
+            try:
+                os.sched_setscheduler(0, os.SCHED_FIFO,
+                                      os.sched_param(self.rt_priority))
+            except (AttributeError, OSError) as e:
+                print(f"[{self.name}] Could not set real-time priority "
+                      f"{self.rt_priority} ({e}); running at normal "
+                      f"priority. Conversion timing and thus the top and "
+                      f"bottom rows may jitter.")
 
         # Set image_id counter
         self.image_id = 0

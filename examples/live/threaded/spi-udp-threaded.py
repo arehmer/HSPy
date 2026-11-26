@@ -26,6 +26,17 @@ Command-line Arguments
 --target_port : int (optional, default 5005)
     Port the peer's UDP_PickleClient(Process) is listening on.
 
+
+Real-time priority (one-time setup)
+===================================
+The acquisition thread asks for the real-time priority SCHED_FIFO. Allow
+it for your user once, then log out and in again:
+
+echo "$USER - rtprio 50" | sudo tee /etc/security/limits.d/99-rtprio.conf
+
+Check with 'ulimit -r' (must print 50). Without it the script still runs,
+prints a warning and the top and bottom rows may flicker.
+
 @author: rehmer
 """
 
@@ -112,8 +123,13 @@ if __name__ == '__main__':
     #%% Create the SPI pipeline: one thread only acquires raw frames, a
     # second one converts them and applies calibration and LuT, so that the
     # next frame is acquired while the previous one is processed
+    # rt_priority: real-time priority (SCHED_FIFO) for this thread only, so
+    # that the time between conversions stays constant; a varying idle time
+    # before a conversion makes the top and bottom rows flicker. Needs the
+    # one-time setup described in the module docstring.
     spi_thread = SPI_AcquisitionThread(spi_driver = spi_driver,
                                        write_buffer = raw_buffer,
+                                       rt_priority = 20,
                                        profile = True,
                                        profile_every= 50)
 
