@@ -880,66 +880,52 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         c = self._calib             # Calibration data dictionary
 
+        # All frame-independent factors are precomputed as float32 arrays by
+        # _precompute_calib(); per frame only scalars and a few float32
+        # multiply-adds remain.
+
         # ------------- 15.1 Ambient Temperature ------------------------------
         data = self.calculate_Tamb(data)
 
         PTAT_avg = data['ptat_avg']
 
-        # ------------- 15.2 Thermal Offset -----------------------------------
-        Th_grad   = c["thgrad_arr"]
-        Th_off    = c["thoffset_arr"]
-        gradScale = c["gradscale"]
-
-        V_ThComp = (Th_grad * PTAT_avg) / 2 ** (gradScale) + Th_off
-
-        data['V_ThComp'] = V_ThComp         # store for debugging
-
-        V_comp = data['pix'].astype(np.float64) - V_ThComp   # apply compensation
-
-        # ------------- 15.3 Electrical Offset --------------------------------
-        V_ElComp = data['eloff'].astype(np.float64)
-
-        data['V_ElComp'] = V_ElComp         # store for debugging
-
-        V_comp = V_comp - V_ElComp          # apply compensation
-
-        # ------------- 15.4 Vdd Compensation ---------------------------------
-        VddCompGrad = c["vddcompgrad_arr"]
-        VddCompOff  = c["vddcompoff_arr"]
-        VddScGrad   = c["vddscgrad"]
-        VddScOff    = c["vddscoff"]
-
-        VddTh1      = c["vddth1"]
-        VddTh2      = c["vddth2"]
-        PTAT_Th1    = c["ptat_th1"]
-        PTAT_Th2    = c["ptat_th2"]
-
-        VDD_avg = data['vdd'].astype(np.float64).mean()
+        # ------------- 15.4 Vdd factor (scalar) ------------------------------
+        VDD_avg = data['vdd'].mean()        # uint16 in, float64 accumulator
 
         data['vdd_avg'] = VDD_avg
 
-        V_VddComp = ((VddCompGrad * PTAT_avg) / (2 ** VddScGrad) + VddCompOff) / \
-            (2 ** VddScOff) * \
-            (VDD_avg - VddTh1 - ((VddTh2 - VddTh1) / (PTAT_Th2 - PTAT_Th1)) *
-             (PTAT_avg - PTAT_Th1))
+        f_vdd = VDD_avg - c["vddth1"] - c["vdd_slope"] * (PTAT_avg - c["ptat_th1"])
 
-        data['V_VddComp'] = V_VddComp       # store for debugging
+        p   = np.float32(PTAT_avg)
+        f   = np.float32(f_vdd)
+        p_f = np.float32(PTAT_avg * f_vdd)
 
-        V_comp = V_comp - V_VddComp         # apply compensation
+        # ------------- 15.2 Thermal Offset -----------------------------------
+        V_ThComp = c["thgrad_s"] * p
+        V_ThComp += c["thoffset_f"]
+
+        # ------------- 15.4 Vdd Compensation ---------------------------------
+        V_VddComp = c["vddgrad_s"] * p_f
+        V_VddComp += c["vddoff_s"] * f
+
+        # ------------- 15.3 Electrical Offset --------------------------------
+        # pix and eloff stay uint16 until here; the subtraction casts both
+        # straight to float32, without a float64 copy and without the
+        # wrap-around a uint16 difference would have
+        V_comp = np.subtract(data['pix'], data['eloff'], dtype=np.float32)
+
+        V_comp -= V_ThComp
+        V_comp -= V_VddComp
+
+        # Stored for debugging (only kept with keep_raw); references, no copies
+        data['V_ThComp']  = V_ThComp
+        data['V_ElComp']  = data['eloff']
+        data['V_VddComp'] = V_VddComp
+        data['scale']     = c["scale"]
 
         # ------------- 15.5 Object Temperature -------------------------------
-        Pij         = c["pij_arr"]
-        PixC_max    = c["pixcmax"]
-        PixC_min    = c["pixcmin"]
-        eps         = c["epsilon"]
-        GlobalGain  = c["global_gain"]
-
-        PixCij = (Pij * (PixC_max - PixC_min) / 65535 + PixC_min) * \
-            eps / 100 * GlobalGain / 10000
-
-        data['scale'] = _PCSCALEVAL / PixCij   # store for debugging
-
-        pix_comp = V_comp * _PCSCALEVAL / PixCij
+        V_comp *= c["scale"]
+        pix_comp = V_comp
 
         # ------------- 16.1 Pixel Masking ------------------------------------
         pix_comp = self.mask_dead_pixels(pix_comp)
@@ -976,15 +962,12 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                 "apply_LuT() needs the compensated pixel voltages. Construct "
                 "the driver with applyCalib=True, or set driver.calcdK = False.")
 
-        # Arrange the compensated pixel voltages and the ambient temperature
-        # in a np.ndarray
-        Ud_Ta = np.hstack([data['pix_comp'].reshape((-1, 1)),
-                           np.tile(data['Tamb'], (_PIXELS, 1)).reshape((-1, 1))])
-
-        pix_dK = self.LuT.calc_To(Ud_Ta)
+        # Tamb is the same for every pixel of the frame, so the bilinear LuT
+        # interpolation reduces to one LuT column and np.interp along Ud
+        pix_dK = self.LuT.calc_To_const_Ta(data['pix_comp'], data['Tamb'])
 
         # Section 16.1 masks the temperature values of the defect pixels
-        pix_dK = self.mask_dead_pixels(np.asarray(pix_dK).flatten())
+        pix_dK = self.mask_dead_pixels(pix_dK)
 
         data['pix_dK'] = pix_dK
 
@@ -1135,7 +1118,39 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         c["vddcompgrad_arr"] = self._sort_perBlock_calibData(c["vddcompgrad"])
         c["vddcompoff_arr"]  = self._sort_perBlock_calibData(c["vddcompoff"])
 
+        self._precompute_calib(c)
+
         self._calib = c
+
+    @staticmethod
+    def _precompute_calib(c: dict) -> None:
+        """
+        Fold every frame-independent part of apply_calib() into per-pixel
+        float32 arrays once, so that a frame only needs a few multiply-adds
+        (Sections 15.2 - 15.5):
+
+            V_ThComp  = thgrad_s * PTAT_av + thoffset_f
+            V_VddComp = vddgrad_s * PTAT_av * f_vdd + vddoff_s * f_vdd
+            pix_comp  = (pix - eloff - V_ThComp - V_VddComp) * scale
+
+        with the frame scalar f_vdd = VDD_av - VddTh1 - vdd_slope * (PTAT_av - PTAT_Th1).
+        Computed in float64, stored as float32: float32 halves the memory
+        traffic of every per-frame operation, and its 24-bit mantissa still
+        resolves the 16-bit sensor digits.
+        """
+        f32 = np.float32
+
+        c["thgrad_s"]   = (c["thgrad_arr"] / 2 ** c["gradscale"]).astype(f32)
+        c["thoffset_f"] = c["thoffset_arr"].astype(f32)
+
+        c["vddgrad_s"] = (c["vddcompgrad_arr"] / 2 ** c["vddscgrad"]
+                          / 2 ** c["vddscoff"]).astype(f32)
+        c["vddoff_s"]  = (c["vddcompoff_arr"] / 2 ** c["vddscoff"]).astype(f32)
+        c["vdd_slope"] = (c["vddth2"] - c["vddth1"]) / (c["ptat_th2"] - c["ptat_th1"])
+
+        PixCij = (c["pij_arr"] * (c["pixcmax"] - c["pixcmin"]) / 65535
+                  + c["pixcmin"]) * c["epsilon"] / 100 * c["global_gain"] / 10000
+        c["scale"] = (_PCSCALEVAL / PixCij).astype(f32)
 
     def read_flash_id(self) -> bytes:
         """Return the 3-byte JEDEC ID of the internal flash."""
