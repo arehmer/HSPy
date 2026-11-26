@@ -23,6 +23,11 @@ python ./SPI_FlickerTest.py --bus 0 --frames 300 --eloff_every 8 --gap_ms 0
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --eloff_every 8 --gap_ms 50
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --eloff_every 1 --gap_ms 50
 
+Under the real load of spi-udp-threaded.py, at normal and at real-time
+priority of the acquisition thread:
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20
+
 Analyse a recording again, e.g. on the PC:
 python ./SPI_FlickerTest.py --analyze flicker_e8_g50.npz
 
@@ -38,13 +43,24 @@ Command-line Arguments
 --gap_ms : float (default 0)
     Extra pause between frames, drawn uniformly from [0, gap_ms]. Imitates
     the irregular idle time the threaded pipeline causes before block 0.
+--pipeline : str (optional)
+    IP address of a peer running udp-pickle-imshow-mp.py. Records inside the
+    real threaded pipeline (acquisition, processing, UDP server) instead of
+    a plain loop; --gap_ms is then ignored.
+--target_port : int (default 5005)
+    Port of that peer.
+--rt_priority : int (optional)
+    With --pipeline: SCHED_FIFO priority of the acquisition thread (see
+    spi-udp-threaded.py for the one-time setup). Default: normal priority.
 --out : str (optional)
-    File the recording is saved to (default flicker_e<n>_g<ms>.npz).
+    File the recording is saved to (default flicker_e<n>_g<ms>.npz or
+    flicker_e<n>_pipe_rt<priority>.npz).
 --analyze : str (optional)
     Skip recording, only analyse this .npz file.
 """
 
 import argparse
+import os
 import random
 import time
 
@@ -83,9 +99,34 @@ def make_ee_enable(pin: int = 8, chip: int = 0):
     return ee_enable
 
 
-def record(d, n_frames: int, gap_ms: float) -> dict:
-    """Record n_frames raw frames with driver d, see module docstring."""
+def record(d, n_frames: int, gap_ms: float = 0.0,
+           target: tuple = None, rt_priority: int = None) -> dict:
+    """
+    Record n_frames raw frames with driver d, see module docstring.
+
+    target=None: a plain loop in this thread, with an extra random pause of
+    0..gap_ms between frames. target=(ip, port): the real threaded pipeline
+    of spi-udp-threaded.py (acquisition, processing, UDP server to target),
+    with the acquisition thread at rt_priority; gap_ms is ignored.
+    """
     from hspy.drivers.spi.drivers import _CMD_CONFIG, _BIT_START, _BIT_BLIND
+
+    if target is not None:
+        import sys
+        from queue import Queue
+        from hspy.ipc.threads import (SPI_AcquisitionThread,
+                                      SPI_ProcessingThread, UDP_PickleServer)
+        sys.setswitchinterval(0.0005)            # as in spi-udp-threaded.py
+        raw_buffer, spi_buffer = Queue(maxsize=4), Queue(maxsize=4)
+        # Created before d._write_register is wrapped below: it works on a
+        # pickled copy of d, and the wrapper cannot be pickled
+        proc_thread = SPI_ProcessingThread(spi_driver=d,
+                                           read_buffer=raw_buffer,
+                                           write_buffer=spi_buffer)
+        server_thread = UDP_PickleServer(name='udp_pickle_server_thread',
+                                         read_buffer=spi_buffer,
+                                         target_ip=target[0],
+                                         target_port=target[1])
 
     # Time stamp every conversion START: (perf_counter, BLIND bit set)
     starts = []
@@ -98,35 +139,73 @@ def record(d, n_frames: int, gap_ms: float) -> dict:
 
     d._write_register = logged_write_register
 
-    pix, eloff, ptat, vdd = [], [], [], []
-    gap, dt_blocks, phase = [], [], []
+    # One acquire_raw() plus its timing; runs in the acquiring thread
+    raws, gap, dt_blocks, phase = [], [], [], []
+    rt_actual = []          # real-time priority the acquiring thread got
+
+    def grab() -> dict:
+        if not rt_actual:
+            fifo = (hasattr(os, 'sched_getscheduler')
+                    and os.sched_getscheduler(0) == os.SCHED_FIFO)
+            rt_actual.append(os.sched_getparam(0).sched_priority if fifo else -1)
+        first = len(starts)
+        raw = d.acquire_raw()
+        phase.append(d._n_since_eloff)           # 1 = fresh eloff this frame
+
+        # read_frame() runs before the BLIND conversion, so the first
+        # START of this frame is block 0
+        t_block = [t for t, blind in starts[first:] if not blind]
+        gap.append(t_block[0] - starts[first - 1][0] if first else np.nan)
+        dt_blocks.append(np.median(np.diff(t_block)))
+        raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
+        return raw
+
     try:
-        for i in range(n_frames):
-            first = len(starts)
-            raw = d.acquire_raw()
-            phase.append(d._n_since_eloff)       # 1 = fresh eloff this frame
-            data = d.convert_spi_data(raw)
+        if target is None:
+            for i in range(n_frames):
+                grab()
+                if gap_ms > 0:
+                    time.sleep(random.uniform(0, gap_ms) * 1e-3)
+        else:
+            class RecordingAcquisitionThread(SPI_AcquisitionThread):
+                def _acquire(self):
+                    return grab()
 
-            pix.append(data['pix'].copy())
-            eloff.append(data['eloff'].copy())
-            ptat.append(data['ptat'].copy())
-            vdd.append(data['vdd'].copy())
-
-            # read_frame() runs before the BLIND conversion, so the first
-            # START of this frame is block 0
-            t_block = [t for t, blind in starts[first:] if not blind]
-            gap.append(t_block[0] - starts[first - 1][0] if first else np.nan)
-            dt_blocks.append(np.median(np.diff(t_block)))
-
-            if gap_ms > 0:
-                time.sleep(random.uniform(0, gap_ms) * 1e-3)
+            spi_thread = RecordingAcquisitionThread(spi_driver=d,
+                                                    write_buffer=raw_buffer,
+                                                    rt_priority=rt_priority)
+            threads = (spi_thread, proc_thread, server_thread)
+            for t in threads:
+                t.start()
+            try:
+                while len(raws) < n_frames and spi_thread.is_alive():
+                    time.sleep(0.2)
+            finally:
+                for t in reversed(threads):
+                    t.stop()
+                for t in threads:
+                    t.join()
     finally:
         d._write_register = write_register
 
+    # Convert after the recording, so that it adds no load while recording
+    n = min(n_frames, len(raws))
+    pix, eloff, ptat, vdd = [], [], [], []
+    for pix_raw, eloff_raw in raws[:n]:
+        data = d.convert_spi_data({'pix_raw': pix_raw, 'eloff_raw': eloff_raw})
+        pix.append(data['pix'].copy())
+        eloff.append(data['eloff'].copy())
+        ptat.append(data['ptat'].copy())
+        vdd.append(data['vdd'].copy())
+
     return dict(pix=np.array(pix), eloff=np.array(eloff),
                 ptat=np.array(ptat), vdd=np.array(vdd),
-                gap_ms=np.array(gap) * 1e3, dt_blocks_ms=np.array(dt_blocks) * 1e3,
-                phase=np.array(phase), eloff_every=d.eloff_every, gap_max_ms=gap_ms)
+                gap_ms=np.array(gap[:n]) * 1e3,
+                dt_blocks_ms=np.array(dt_blocks[:n]) * 1e3,
+                phase=np.array(phase[:n]), eloff_every=d.eloff_every,
+                gap_max_ms=gap_ms if target is None else np.nan,
+                pipeline=target is not None,
+                rt_priority=rt_actual[0] if rt_actual else -1)
 
 
 def analyze(r) -> None:
@@ -136,10 +215,16 @@ def analyze(r) -> None:
     gap, phase = r['gap_ms'][1:], r['phase'][1:]
     n = len(pix)
 
-    print(f"\n{n} frames, eloff_every={int(r['eloff_every'])}, "
-          f"extra gap 0..{float(r['gap_max_ms']):.0f} ms")
+    if 'pipeline' in getattr(r, 'files', r) and r['pipeline']:
+        rt = int(r['rt_priority'])
+        mode = (f"threaded pipeline, acquisition priority "
+                f"{'normal' if rt < 0 else f'SCHED_FIFO {rt}'}")
+    else:
+        mode = f"extra gap 0..{float(r['gap_max_ms']):.0f} ms"
+    print(f"\n{n} frames, eloff_every={int(r['eloff_every'])}, {mode}")
     print(f"START-to-START before block 0: median {np.nanmedian(gap):.1f} ms, "
-          f"min {np.nanmin(gap):.1f}, max {np.nanmax(gap):.1f};  "
+          f"min {np.nanmin(gap):.1f}, max {np.nanmax(gap):.1f}, "
+          f"std {np.nanstd(gap):.2f};  "
           f"between blocks 1..11: median {np.median(r['dt_blocks_ms']):.1f} ms")
 
     # Frame-to-frame flicker of each block relative to the mean of blocks
@@ -186,6 +271,9 @@ if __name__ == '__main__':
     p.add_argument('--frames', type=int, default=300)
     p.add_argument('--eloff_every', type=int, default=8)
     p.add_argument('--gap_ms', type=float, default=0.0)
+    p.add_argument('--pipeline', type=str, default=None, metavar='TARGET_IP')
+    p.add_argument('--target_port', type=int, default=5005)
+    p.add_argument('--rt_priority', type=int, default=None)
     p.add_argument('--out', type=str, default=None)
     p.add_argument('--analyze', type=str, default=None)
     args = p.parse_args()
@@ -197,11 +285,16 @@ if __name__ == '__main__':
         d = SPI_HTPA160x120dR1(bus=args.bus, device=0,
                                ee_enable=make_ee_enable(pin=8),
                                eloff_every=args.eloff_every)
+        target = (args.pipeline, args.target_port) if args.pipeline else None
         try:
-            r = record(d, args.frames, args.gap_ms)
+            r = record(d, args.frames, args.gap_ms, target, args.rt_priority)
         finally:
             d.close()
-        out = args.out or f"flicker_e{args.eloff_every}_g{args.gap_ms:g}.npz"
+        if target:
+            name = f"pipe_rt{args.rt_priority or 0}"
+        else:
+            name = f"g{args.gap_ms:g}"
+        out = args.out or f"flicker_e{args.eloff_every}_{name}.npz"
         np.savez_compressed(out, **r)
         print(f"Saved {out}")
         analyze(r)
