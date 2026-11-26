@@ -475,6 +475,14 @@ def analyze(r) -> None:
         k, c0 = np.polyfit(g, b0, 1)
         print(f"\nBlock 0 (pix-eloff, rel. to blocks 1..11) vs. gap: "
               f"corr {np.corrcoef(g, b0)[0, 1]:+.2f}, slope {k:+.3f} digits/ms")
+    if 'first_ms' in getattr(r, 'files', r) and r['warmup']:
+        # Does block 0 still remember the pause in front of the warm-up?
+        fg = r['first_ms'][1:]
+        if np.std(fg) > 0:
+            k, c0 = np.polyfit(fg, b0, 1)
+            print(f"Block 0 (pix-eloff, rel. to blocks 1..11) vs. pause before "
+                  f"the warm-up: corr {np.corrcoef(fg, b0)[0, 1]:+.2f}, "
+                  f"slope {k:+.3f} digits/ms")
     if 'interval_ms' in getattr(r, 'files', r):
         # Timing inside the frame: START-to-START before every block, and
         # whether the blocks follow their own preceding interval or the
