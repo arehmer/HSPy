@@ -1,0 +1,595 @@
+# -*- coding: utf-8 -*-
+"""
+Flicker diagnosis for the HTPA160x120dR1 over SPI.
+
+Records raw frames and, per frame, the mean digits of every block (top and
+bottom half), the time since the previous conversion START before block 0
+and whether the frame read fresh electrical offsets. Then prints how much
+each block fluctuates from frame to frame and whether block 0 depends on
+the gap or on the eloff phase.
+
+Block x of the top and the bottom half are converted together (Section 8);
+block 0 holds the top 5 rows of the top half and the bottom 5 rows of the
+bottom half.
+
+Cover the lens (or look at a uniform, stable scene) while recording.
+
+
+Usage Examples
+==============
+
+On the Pi (records and analyses):
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --eloff_every 8 --gap_ms 0
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --eloff_every 8 --gap_ms 50
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --eloff_every 1 --gap_ms 50
+
+Under the real load of spi-udp-threaded.py, at normal and at real-time
+priority of the acquisition thread:
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --no_warmup
+
+The same with the acquisition in a process of its own (spi-udp-mp.py):
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --process
+
+Analyse a recording again, e.g. on the PC:
+python ./SPI_FlickerTest.py --analyze flicker_e8_g50.npz
+
+
+Command-line Arguments
+======================
+--bus : int
+    SPI bus that the HTPA device is connected to.
+--frames : int (default 300)
+    Number of frames to record.
+--eloff_every : int (default 8)
+    Passed to the driver: fresh electrical offsets every n-th frame.
+--gap_ms : float (default 0)
+    Extra pause between frames, drawn uniformly from [0, gap_ms]. Imitates
+    the irregular idle time the threaded pipeline causes before block 0.
+--pipeline : str (optional)
+    IP address of a peer running udp-pickle-imshow-mp.py. Records inside the
+    real threaded pipeline (acquisition, processing, UDP server) instead of
+    a plain loop; --gap_ms is then ignored.
+--target_port : int (default 5005)
+    Port of that peer.
+--rt_priority : int (optional)
+    With --pipeline: SCHED_FIFO priority of the acquisition thread or
+    process (see
+    spi-udp-threaded.py for the one-time setup). Default: normal priority.
+--no_warmup : flag
+    Switch off the driver's warm-up conversion of block 0 in front of
+    every frame (SPI_HTPA160x120dR1(warmup=...), on by default).
+--early : flag
+    Switch on the driver's early start of the next frame's first
+    conversion (SPI_HTPA160x120dR1(early_start=...), off by default).
+--process : flag
+    With --pipeline: run the pipeline of spi-udp-mp.py instead, i.e.
+    acquisition (at --rt_priority), processing and UDP server each in a
+    process of its own. The acquisition then has a GIL of its own. Needs
+    the 'fork' start method of multiprocessing (Linux default up to
+    Python 3.13), as spi-udp-mp.py does.
+--out : str (optional)
+    File the recording is saved to (default flicker_e<n>_g<ms>.npz or
+    flicker_e<n>_pipe_rt<priority>.npz or flicker_e<n>_proc_rt<priority>.npz,
+    followed by _w<0|1>e<0|1> for warm-up and early start).
+--analyze : str (optional)
+    Skip recording, only analyse this .npz file.
+"""
+
+import argparse
+import os
+import random
+import time
+
+import numpy as np
+
+from hspy.ipc.processes import SPI_AcquisitionProcess
+
+_BLOCKS = 12
+_ROWS, _COLS = 120, 160
+_ROWS_BLOCK = 5
+
+# Block index of every image row: top half top-down, bottom half bottom-up
+_ROW_BLOCK = np.array([r // _ROWS_BLOCK if r < _ROWS // 2
+                       else (_ROWS - 1 - r) // _ROWS_BLOCK
+                       for r in range(_ROWS)])
+_ROW_HALF = (np.arange(_ROWS) >= _ROWS // 2).astype(int)
+
+
+def block_means(img: np.ndarray) -> np.ndarray:
+    """(N, 19200) frames -> (N, 2, 12) mean per half and block."""
+    rows = img.reshape(len(img), _ROWS, _COLS).mean(axis=2)      # (N, 120)
+    out = np.empty((len(img), 2, _BLOCKS))
+    for h in range(2):
+        for b in range(_BLOCKS):
+            out[:, h, b] = rows[:, (_ROW_HALF == h) & (_ROW_BLOCK == b)].mean(axis=1)
+    return out
+
+
+def _flicker(px: np.ndarray, ref: np.ndarray) -> tuple:
+    """
+    px (N, ...) pixel values per frame, ref (N,) reference per frame.
+    Returns, each as rms frame-to-frame change / sqrt(2):
+    the flicker of the mean of px minus ref, the part of it the independent
+    noise of the pixels explains, and that noise of a single pixel.
+    """
+    d = np.diff(px.reshape(len(px), -1), axis=0)
+    p = d.shape[1]
+    c = d.mean(axis=1)
+    e2 = ((d - c[:, None]) ** 2).mean()           # = sigma^2 (1 - 1/p) * 2
+    c = c - np.diff(ref)
+    return (np.sqrt((c ** 2).mean() / 2), np.sqrt(e2 / (p - 1) / 2),
+            np.sqrt(e2 * p / (p - 1) / 2))
+
+
+def make_ee_enable(pin: int = 8, chip: int = 0):
+    import lgpio
+    h = lgpio.gpiochip_open(chip)
+    lgpio.gpio_claim_output(h, pin, 1)           # idle HIGH
+    write = lgpio.gpio_write
+
+    def ee_enable(level: bool) -> None:
+        write(h, pin, level)
+    ee_enable.handle = h
+    return ee_enable
+
+
+class Recorder:
+    """
+    Records with driver d: wraps d._write_register to time stamp every
+    conversion START, grab() runs one acquire_raw() and keeps its raw bytes
+    and timing, result() converts everything and restores d. Lives in the
+    thread or process that acquires.
+    """
+
+    def __init__(self, d):
+        from hspy.drivers.spi.drivers import _CMD_CONFIG, _BIT_START, _BIT_BLIND
+        self.d = d
+        self.starts = []        # (perf_counter, BLIND bit set) of every START
+        self.raws, self.gap, self.dt_blocks, self.phase = [], [], [], []
+        self.intervals = []     # START-to-START before each of the 12 blocks
+        self.first_gap = []     # START-to-START before the warm-up
+        self.rt_actual = None   # real-time priority the acquiring thread got
+
+        self._write_register = write_register = d._write_register
+        starts = self.starts
+
+        def logged_write_register(cmd, value):
+            if cmd == _CMD_CONFIG and value & _BIT_START:
+                starts.append((time.perf_counter(), bool(value & _BIT_BLIND)))
+            write_register(cmd, value)
+
+        d._write_register = logged_write_register
+
+    def grab(self) -> dict:
+        """One acquire_raw() plus its timing; returns the raw frame."""
+        d, starts = self.d, self.starts
+        if self.rt_actual is None:
+            fifo = (hasattr(os, 'sched_getscheduler')
+                    and os.sched_getscheduler(0) == os.SCHED_FIFO)
+            self.rt_actual = os.sched_getparam(0).sched_priority if fifo else -1
+        first = len(starts)
+        # The first conversion of this frame was already started at the
+        # end of the previous one (early start)
+        pending = d._t_next is not None
+        raw = d.acquire_raw()
+        self.phase.append(d._n_since_eloff)      # 1 = fresh eloff this frame
+
+        # START indices of this frame's conversions without BLIND: the
+        # warm-up (if on) and blocks 0..11
+        idx = [i for i in range(first, len(starts)) if not starts[i][1]]
+        if d._t_next is not None:
+            idx = idx[:-1]          # already the next frame's first START
+        if pending:
+            idx = [first - 1] + idx
+        prev = starts[idx[0] - 1][0] if idx[0] > 0 else np.nan
+        iv = np.diff([prev] + [starts[i][0] for i in idx])
+        self.first_gap.append(iv[0])
+        if d.warmup:
+            iv = iv[1:]             # from the warm-up to block 0, ...
+        self.gap.append(iv[0])
+        self.dt_blocks.append(np.median(iv[1:]))
+        self.intervals.append(list(iv))
+        self.raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
+        return raw
+
+    def result(self, n_frames: int, **mode) -> dict:
+        """Restore d, convert the recording (after recording, so that it
+        adds no load) and return it plus the keyword arguments in mode."""
+        d = self.d
+        d._write_register = self._write_register
+        n = min(n_frames, len(self.raws))
+        pix, eloff, ptat, vdd = [], [], [], []
+        for pix_raw, eloff_raw in self.raws[:n]:
+            data = d.convert_spi_data({'pix_raw': pix_raw, 'eloff_raw': eloff_raw})
+            pix.append(data['pix'].copy())
+            eloff.append(data['eloff'].copy())
+            ptat.append(data['ptat'].copy())
+            vdd.append(data['vdd'].copy())
+
+        return dict(pix=np.array(pix), eloff=np.array(eloff),
+                    ptat=np.array(ptat), vdd=np.array(vdd),
+                    gap_ms=np.array(self.gap[:n]) * 1e3,
+                    dt_blocks_ms=np.array(self.dt_blocks[:n]) * 1e3,
+                    interval_ms=np.array(self.intervals[:n]) * 1e3,
+                    first_ms=np.array(self.first_gap[:n]) * 1e3,
+                    phase=np.array(self.phase[:n]), eloff_every=d.eloff_every,
+                    rt_priority=-1 if self.rt_actual is None else self.rt_actual,
+                    warmup=d.warmup, early=d.early_start,
+                    # digits -> compensated signal per pixel, 1 / sensitivity
+                    # (Section 15.5); shows what the noise means in the image
+                    scale=np.asarray(d._calib["scale"]),
+                    **mode)
+
+
+def record(d, n_frames: int, gap_ms: float = 0.0,
+           target: tuple = None, rt_priority: int = None) -> dict:
+    """
+    Record n_frames raw frames with driver d, see module docstring.
+
+    target=None: a plain loop in this thread, with an extra random pause of
+    0..gap_ms between frames. target=(ip, port): the real threaded pipeline
+    of spi-udp-threaded.py (acquisition, processing, UDP server to target),
+    with the acquisition thread at rt_priority; gap_ms is ignored.
+    Warm-up and early start are whatever the driver d is set to.
+    """
+    if target is not None:
+        import sys
+        from queue import Queue
+        from hspy.ipc.threads import (SPI_AcquisitionThread,
+                                      SPI_ProcessingThread, UDP_PickleServer)
+        sys.setswitchinterval(0.0005)            # as in spi-udp-threaded.py
+        raw_buffer, spi_buffer = Queue(maxsize=4), Queue(maxsize=4)
+        # Created before Recorder wraps d._write_register: it works on a
+        # pickled copy of d, and the wrapper cannot be pickled
+        proc_thread = SPI_ProcessingThread(spi_driver=d,
+                                           read_buffer=raw_buffer,
+                                           write_buffer=spi_buffer)
+        server_thread = UDP_PickleServer(name='udp_pickle_server_thread',
+                                         read_buffer=spi_buffer,
+                                         target_ip=target[0],
+                                         target_port=target[1])
+
+    rec = Recorder(d)
+    try:
+        if target is None:
+            for i in range(n_frames):
+                rec.grab()
+                if gap_ms > 0:
+                    time.sleep(random.uniform(0, gap_ms) * 1e-3)
+        else:
+            class RecordingAcquisitionThread(SPI_AcquisitionThread):
+                def _acquire(self):
+                    return rec.grab()
+
+            spi_thread = RecordingAcquisitionThread(spi_driver=d,
+                                                    write_buffer=raw_buffer,
+                                                    rt_priority=rt_priority)
+            threads = (spi_thread, proc_thread, server_thread)
+            for t in threads:
+                t.start()
+            try:
+                while len(rec.raws) < n_frames and spi_thread.is_alive():
+                    time.sleep(0.2)
+            finally:
+                for t in reversed(threads):
+                    t.stop()
+                for t in threads:
+                    t.join()
+    finally:
+        r = rec.result(n_frames,
+                       gap_max_ms=gap_ms if target is None else np.nan,
+                       pipeline=target is not None, process=False)
+    return r
+
+
+class RecordingAcquisitionProcess(SPI_AcquisitionProcess):
+    """
+    SPI_AcquisitionProcess that records with a Recorder inside the child
+    process, sets the event done once n_frames are recorded and, when
+    stopped, saves the recording to out_path.
+    """
+
+    def __init__(self, n_frames: int, out_path: str, done, **kwargs):
+        self.n_frames, self.out_path, self.done = n_frames, out_path, done
+        super().__init__(**kwargs)
+
+    def _setup(self):
+        super()._setup()        # hands the unwrapped driver to processing
+        self.recorder = Recorder(self.spi_driver)
+
+    def _acquire(self) -> dict:
+        raw = self.recorder.grab()
+        if len(self.recorder.raws) >= self.n_frames:
+            self.done.set()
+        return raw
+
+    def _teardown(self):
+        recorder = getattr(self, 'recorder', None)
+        if recorder is not None:
+            np.savez(self.out_path, **recorder.result(
+                self.n_frames, gap_max_ms=np.nan, pipeline=True, process=True))
+        super()._teardown()
+
+
+def record_process(driver_cls, driver_kwargs: dict, n_frames: int,
+                   target: tuple, rt_priority: int = None) -> dict:
+    """
+    Record n_frames like record(target=...), but in the process pipeline
+    of spi-udp-mp.py: acquisition (at rt_priority), processing and UDP
+    server each in a process of its own. The driver is built from
+    driver_cls(**driver_kwargs) inside the acquisition process.
+    """
+    import tempfile
+    from multiprocessing import Event
+    from hspy.ipc.processes_base import SharedMemoryQueue
+    from hspy.ipc.processes import SPI_ProcessingProcess, UDP_PickleServerProcess
+
+    # As in spi-udp-mp.py
+    raw_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=256 * 1024)
+    spi_buffer = SharedMemoryQueue(maxsize=4, slot_bytes=4 * 1024 * 1024)
+    done = Event()
+    out_dir = tempfile.mkdtemp()
+    out_path = os.path.join(out_dir, 'recording.npz')
+
+    acq = RecordingAcquisitionProcess(n_frames=n_frames, out_path=out_path,
+                                      done=done,
+                                      spi_driver_cls=driver_cls,
+                                      spi_driver_kwargs=driver_kwargs,
+                                      write_buffer=raw_buffer,
+                                      rt_priority=rt_priority)
+    proc = SPI_ProcessingProcess(processor_queue=acq.processor_queue,
+                                 read_buffer=raw_buffer,
+                                 write_buffer=spi_buffer)
+    server = UDP_PickleServerProcess(name='udp_pickle_server_process',
+                                     read_buffer=spi_buffer,
+                                     target_ip=target[0],
+                                     target_port=target[1])
+    processes = (acq, proc, server)
+    for p in processes:
+        p.start()
+    try:
+        while not done.wait(0.2) and acq.is_alive():
+            pass
+    finally:
+        for p in reversed(processes):
+            p.stop()
+        for p in processes:
+            p.join()
+        raw_buffer.close()
+        spi_buffer.close()
+
+    with np.load(out_path) as f:
+        r = dict(f)
+    os.remove(out_path)
+    os.rmdir(out_dir)
+    return r
+
+
+def analyze(r) -> None:
+    # Frame 0 is the first one after init() and has no gap: left out
+    pix = r['pix'][1:].astype(np.float64)
+    comp = pix - r['eloff'][1:]
+    gap, phase = r['gap_ms'][1:], r['phase'][1:]
+    n = len(pix)
+
+    if 'pipeline' in getattr(r, 'files', r) and r['pipeline']:
+        rt = int(r['rt_priority'])
+        kind = ('process pipeline' if 'process' in getattr(r, 'files', r)
+                and r['process'] else 'threaded pipeline')
+        mode = (f"{kind}, acquisition priority "
+                f"{'normal' if rt < 0 else f'SCHED_FIFO {rt}'}")
+    else:
+        mode = f"extra gap 0..{float(r['gap_max_ms']):.0f} ms"
+    if 'warmup' in getattr(r, 'files', r) and r['warmup']:
+        mode += ", warm-up conversion before block 0"
+    if 'early' in getattr(r, 'files', r) and r['early']:
+        mode += ", early start"
+    print(f"\n{n} frames, eloff_every={int(r['eloff_every'])}, {mode}")
+    print(f"START-to-START before block 0: median {np.nanmedian(gap):.1f} ms, "
+          f"min {np.nanmin(gap):.1f}, max {np.nanmax(gap):.1f}, "
+          f"std {np.nanstd(gap):.2f};  "
+          f"between blocks 1..11: median {np.median(r['dt_blocks_ms']):.1f} ms")
+    if 'first_ms' in getattr(r, 'files', r) and r['warmup']:
+        fg = r['first_ms'][1:]
+        print(f"START-to-START before the warm-up: median {np.nanmedian(fg):.1f} ms, "
+              f"min {np.nanmin(fg):.1f}, max {np.nanmax(fg):.1f}, std {np.nanstd(fg):.2f}")
+
+    # Frame-to-frame flicker of each block relative to the mean of blocks
+    # 1..11 of its half, so neither a common drift of the whole image nor
+    # block 0 itself leaks into the reference. Electrical offsets are the
+    # same for every block and cancel here, so only pix-eloff is shown.
+    # The flicker of a block mean has two parts: a common mode all pixels
+    # of the block share (seen as flicker of the block) and the independent
+    # noise of its pixels averaged over the block, larger the noisier the
+    # pixels are (corners). The latter is estimated from the scatter of the
+    # pixels around their block mean and taken out.
+    img = comp.reshape(n, _ROWS, _COLS)
+    ref = np.stack([img[:, (_ROW_HALF == h) & (_ROW_BLOCK >= 1)].mean(axis=(1, 2))
+                    for h in range(2)], axis=1)                     # (n, 2)
+    tot, flo, sig = (np.empty((2, _BLOCKS)) for _ in range(3))
+    for h in range(2):
+        for b in range(_BLOCKS):
+            tot[h, b], flo[h, b], sig[h, b] = _flicker(
+                img[:, (_ROW_HALF == h) & (_ROW_BLOCK == b)], ref[:, h])
+
+    # Tilt: a line across the 12 blocks of a half whose slope changes from
+    # frame to frame (an offset drifting during the frame, as the blocks are
+    # converted one after the other). It is fitted per frame to blocks 1..11
+    # only, so that block 0 does not pull it, and removed from all blocks.
+    m = block_means(comp)
+    rel = m - m[:, :, 1:].mean(axis=2, keepdims=True)
+    x = np.arange(_BLOCKS) - (_BLOCKS - 1) / 2
+    xc = x - x[1:].mean()
+    sxx = (xc[1:] ** 2).sum()
+    slope = (rel[:, :, 1:] * xc[1:]).sum(axis=2) / sxx              # (n, 2)
+    res = rel - rel[:, :, 1:].mean(axis=2, keepdims=True) - slope[:, :, None] * xc
+    tot_res = np.sqrt((np.diff(res, axis=0) ** 2).mean(axis=0) / 2)
+    # Pixel noise left in the residual: less for the fitted blocks 1..11,
+    # more for the extrapolated block 0
+    lev = 1 / (_BLOCKS - 1) + xc ** 2 / sxx
+    lev[0] = -lev[0]
+
+    def excess(t, f):
+        return np.sqrt(np.maximum(t ** 2 - f ** 2, 0))
+
+    print("\nFlicker per block [digits], pix-eloff rel. to blocks 1..11, "
+          "rms frame-to-frame change / sqrt(2):")
+    print("  pixel  = noise of a single pixel (mean over the block)")
+    print("  total  = flicker of the block mean")
+    print("  noise  = part of it explained by independent pixel noise")
+    print("  common = sqrt(total^2 - noise^2), flicker shared by the block")
+    print("  detilt = common, after removing the per-frame tilt across blocks")
+    print("      |            top half               |            bottom half")
+    print("block | pixel total noise common detilt | pixel total noise common detilt")
+    for b in range(_BLOCKS):
+        print(f"{b:5d} |" + " |".join(
+            f"{sig[h, b]:6.1f}{tot[h, b]:6.2f}{flo[h, b]:6.2f}"
+            f"{excess(tot[h, b], flo[h, b]):7.2f}"
+            f"{excess(tot_res[h, b], flo[h, b] * np.sqrt(1 - lev[b])):7.2f}"
+            for h in range(2)))
+    ds = np.diff(slope.mean(axis=1))
+    print(f"Tilt: rms frame-to-frame change of block 11 - block 0 = "
+          f"{np.sqrt((ds ** 2).mean() / 2) * (_BLOCKS - 1):.2f} digits; "
+          f"corr. top/bottom {np.corrcoef(slope[:, 0], slope[:, 1])[0, 1]:+.2f}")
+    s = slope.mean(axis=1)
+    cs = [f"{name} {np.corrcoef(s, v)[0, 1]:+.2f}" for name, v in
+          (('gap', gap),
+           ('PTAT', r['ptat'][1:].reshape(n, -1).mean(axis=1)),
+           ('VDD', r['vdd'][1:].reshape(n, -1).mean(axis=1)))
+          if np.std(v) > 0]
+    print(f"Tilt slope corr. with {', '.join(cs)}")
+
+    # Block 0 row by row, in the order of the rows in the image
+    print("\nBlock 0 row by row [digits] (common = flicker shared by the row):")
+    print("image row | pixel total noise common")
+    for row in list(range(_ROWS_BLOCK)) + list(range(_ROWS - _ROWS_BLOCK, _ROWS)):
+        t, f, sp = _flicker(img[:, row:row + 1], ref[:, _ROW_HALF[row]])
+        print(f"{row:9d} |{sp:6.1f}{t:6.2f}{f:6.2f}{excess(t, f):7.2f}")
+
+    # Block 0 against the gap and the eloff phase
+    b0 = rel[:, :, 0].mean(axis=1)           # top and bottom together
+    g = gap
+    if np.std(g) > 0:
+        k, c0 = np.polyfit(g, b0, 1)
+        print(f"\nBlock 0 (pix-eloff, rel. to blocks 1..11) vs. gap: "
+              f"corr {np.corrcoef(g, b0)[0, 1]:+.2f}, slope {k:+.3f} digits/ms")
+    if 'first_ms' in getattr(r, 'files', r) and r['warmup']:
+        # Does block 0 still remember the pause in front of the warm-up?
+        fg = r['first_ms'][1:]
+        if np.std(fg) > 0:
+            k, c0 = np.polyfit(fg, b0, 1)
+            print(f"Block 0 (pix-eloff, rel. to blocks 1..11) vs. pause before "
+                  f"the warm-up: corr {np.corrcoef(fg, b0)[0, 1]:+.2f}, "
+                  f"slope {k:+.3f} digits/ms")
+    if 'interval_ms' in getattr(r, 'files', r):
+        # Timing inside the frame: START-to-START before every block, and
+        # whether the blocks follow their own preceding interval or the
+        # time elapsed since block 0 (a settling that builds up over the
+        # frame would show as tilt)
+        iv = r['interval_ms'][1:]
+        print("\nSTART-to-START before each block [ms]: median / std")
+        print("  " + " ".join(f"{v:5.1f}" for v in np.median(iv, axis=0)))
+        print("  " + " ".join(f"{v:5.2f}" for v in iv.std(axis=0)))
+        y = rel.mean(axis=1)[:, 1:]
+        x = iv[:, 1:] - iv[:, 1:].mean(axis=1, keepdims=True)
+        dy, dx = np.diff(y, axis=0).ravel(), np.diff(x, axis=0).ravel()
+        if np.std(dx) > 0:
+            print(f"Blocks 1..11 vs. their own preceding interval: "
+                  f"corr {np.corrcoef(dx, dy)[0, 1]:+.2f}, "
+                  f"slope {np.polyfit(dx, dy, 1)[0]:+.3f} digits/ms")
+        dur = iv[:, 1:].sum(axis=1)             # START block 0 -> START block 11
+        print(f"Frame duration (START block 0 -> 11): std {dur.std():.2f} ms; "
+              f"tilt slope vs. duration: corr "
+              f"{np.corrcoef(slope.mean(axis=1), dur)[0, 1]:+.2f}")
+    print("Block 0 (pix-eloff, rel. to blocks 1..11) by frames since fresh eloff:")
+    for p in np.unique(phase):
+        sel = phase == p
+        print(f"  phase {int(p)}: {b0[sel].mean():+8.2f} digits "
+              f"(std {b0[sel].std():.2f}, n={sel.sum()})")
+
+    # Noise of the single pixels by region: temporal noise of every pixel,
+    # with the common mode of its block removed, in digits and, where the
+    # recording has the calibration scale, relative to the image centre
+    # after calibration (what the image shows; lower sensitivity in the
+    # corners turns the same digits into more temperature noise)
+    d = np.diff(img, axis=0)                                        # (n-1, 120, 160)
+    for h in range(2):
+        for b in range(_BLOCKS):
+            rows = (_ROW_HALF == h) & (_ROW_BLOCK == b)
+            d[:, rows] -= d[:, rows].mean(axis=(1, 2), keepdims=True)
+    sp = np.sqrt((d ** 2).mean(axis=0) / 2)                         # (120, 160)
+    rr, cc = np.mgrid[:_ROWS, :_COLS]
+    corner = (np.minimum(rr, _ROWS - 1 - rr) < 10) & (np.minimum(cc, _COLS - 1 - cc) < 20)
+    centre = (abs(rr - 59.5) < 20) & (abs(cc - 79.5) < 40)
+    has_scale = 'scale' in getattr(r, 'files', r)
+    if has_scale:
+        sc = r['scale'].reshape(_ROWS, _COLS)
+        spc = sp * sc / np.median((sp * sc)[centre])
+        sc = sc / np.median(sc[centre])
+    print("\nNoise of single pixels (block common mode removed), median / 95th percentile:")
+    print("region        | digits        " + ("| calibrated, rel. to centre | scale rel. to centre" if has_scale else ""))
+    for name, sel in (('centre', centre), ('corners', corner),
+                      ('rest', ~centre & ~corner)):
+        line = f"{name:13s} | {np.median(sp[sel]):5.2f} {np.percentile(sp[sel], 95):6.2f}  "
+        if has_scale:
+            line += (f"| {np.median(spc[sel]):5.2f} {np.percentile(spc[sel], 95):6.2f}"
+                     f"               | {np.median(sc[sel]):5.2f}")
+        print(line)
+    print(f"5 noisiest pixels [digits]: {np.sort(sp.ravel())[-5:].round(1)}")
+
+    print("\nPTAT / VDD per block: frame-to-frame rms change [digits], "
+          "block 0 vs. blocks 1..11")
+    for name in ('ptat', 'vdd'):
+        a = r[name][1:].reshape(n, 2, _BLOCKS).astype(np.float64)
+        s = np.sqrt((np.diff(a, axis=0) ** 2).mean(axis=(0, 1)) / 2)
+        print(f"  {name}: block 0 {s[0]:.2f}, blocks 1..11 {s[1:].mean():.2f}")
+
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser(prog='SPI_FlickerTest.py')
+    p.add_argument('--bus', type=int, default=0)
+    p.add_argument('--frames', type=int, default=300)
+    p.add_argument('--eloff_every', type=int, default=8)
+    p.add_argument('--gap_ms', type=float, default=0.0)
+    p.add_argument('--pipeline', type=str, default=None, metavar='TARGET_IP')
+    p.add_argument('--target_port', type=int, default=5005)
+    p.add_argument('--rt_priority', type=int, default=None)
+    p.add_argument('--no_warmup', action='store_true')
+    p.add_argument('--early', action='store_true')
+    p.add_argument('--process', action='store_true')
+    p.add_argument('--out', type=str, default=None)
+    p.add_argument('--analyze', type=str, default=None)
+    args = p.parse_args()
+
+    if args.analyze:
+        analyze(np.load(args.analyze))
+    else:
+        from hspy.drivers.spi import SPI_HTPA160x120dR1
+        target = (args.pipeline, args.target_port) if args.pipeline else None
+        if args.process and target is None:
+            p.error('--process needs --pipeline')
+        kwargs = dict(bus=args.bus, device=0,
+                      ee_enable=make_ee_enable(pin=8),
+                      eloff_every=args.eloff_every,
+                      warmup=not args.no_warmup,
+                      early_start=args.early)
+        if args.process:
+            r = record_process(SPI_HTPA160x120dR1, kwargs, args.frames,
+                               target, args.rt_priority)
+        else:
+            d = SPI_HTPA160x120dR1(**kwargs)
+            try:
+                r = record(d, args.frames, args.gap_ms, target, args.rt_priority)
+            finally:
+                d.close()
+        if target:
+            name = f"{'proc' if args.process else 'pipe'}_rt{args.rt_priority or 0}"
+        else:
+            name = f"g{args.gap_ms:g}"
+        name += f"_w{int(not args.no_warmup)}e{int(args.early)}"
+        out = args.out or f"flicker_e{args.eloff_every}_{name}.npz"
+        np.savez_compressed(out, **r)
+        print(f"Saved {out}")
+        analyze(r)

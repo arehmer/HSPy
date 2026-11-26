@@ -77,14 +77,14 @@ def _print_profile_report(name: str, stats: dict):
         stat.reset()
 
 
-def _new_write_profile() -> dict:
+def write_profile() -> dict:
     """Counters for a producer loop: compute, buffer write, whole cycle."""
     return {'target': _ProfileStat(),
             'put': _ProfileStat(),
             'cycle': _ProfileStat()}
 
 
-def _new_read_profile() -> dict:
+def read_profile() -> dict:
     """Counters for a consumer loop (no buffer write of its own)."""
     return {'target': _ProfileStat(),
             'cycle': _ProfileStat()}

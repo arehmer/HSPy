@@ -6,19 +6,26 @@ Contains multiprocessing versions of:
   - USB_Client              (threads.py)          -> USB_ClientProcess
   - UDP_Client              (threads.py)          -> UDP_ClientProcess
   - I2C_Client              (threads.py)          -> I2C_ClientProcess
+  - SPI_Client              (threads.py)          -> SPI_ClientProcess
   - UDP_PickleServer        (threads.py)          -> UDP_PickleServerProcess
   - UDP_PickleClient        (threads.py)          -> UDP_PickleClientProcess
   - ProposalDetectorThread  (ProcessorThread.py)  -> ProposalDetectorProcess
+
+Every client here writes the frame dictionary of hspy.drivers._frame into
+its write_buffer, plus the 'success' and 'image_id' keys the loop adds --
+the same items the threading clients write, whichever transport is
+underneath. That dictionary is designed for exactly this trip: flat, and
+holding nothing but numpy arrays, plain scalars, strings, tuples and a
+datetime, so that it survives being pickled into a SharedMemoryQueue slot.
 
 DESIGN NOTE -- why these classes take *_cls / *_kwargs instead of a
 ready-made instance
 --------------------------------------------------------------------------
 The threading versions (UDP_Client, I2C_Client) are constructed by passing
-in an already-created, already-opened driver/reader object (an
-HTPA_UDPReader with a bound socket, an I2C_HTPA32x32d with an open SMBus
-handle). That works for threading because a thread shares the parent
-process's memory -- the object, socket and all, is simply usable from the
-new thread.
+in an already-created, already-opened driver object (a UDP_HTPA with a
+bound socket, an I2C_HTPA32x32d with an open SMBus handle). That works for
+threading because a thread shares the parent process's memory -- the
+object, socket and all, is simply usable from the new thread.
 
 It does NOT work for multiprocessing: multiprocessing.Process pickles
 whatever the child needs across the process boundary (or, on Linux with
@@ -44,6 +51,7 @@ and are frequently required e.g. together with CUDA). So sockets are also
 created inside _setup(), never in __init__.
 """
 
+import os
 import time
 import socket
 import struct
@@ -79,20 +87,23 @@ _PICKLE_MAX_CHUNK = 60000
 
 class USB_ClientProcess(WProcess_R1):
     """
-    Multiprocessing version of USB_Client. Runs a USB_HTPA driver in its own
-    process, starts the device's frame stream and writes acquired frames
-    into write_buffer.
+    Multiprocessing version of USB_Client. Runs a USB_HTPA driver in its
+    own process and writes acquired frames into write_buffer.
 
-    Losing the device (unplugged, cable fault, or no frame for lost_after_s
-    seconds) is reported ONCE; the process then puts one final item
-    {'success': False, 'device_lost': True, ...} into write_buffer, sets
-    the device_lost event (readable from the parent) and ends. Other
+    The driver is built from a class + kwargs inside the child process
+    (see the design note at the top of this module), the stream is
+    started in _setup() and stopped in _teardown().
+
+    Losing the device is reported ONCE; the process then puts one final
+    item {'success': False, 'device_lost': True, ...} into write_buffer,
+    sets the device_lost event (readable from the parent) and ends. Other
     errors are printed once per distinct message, not on every attempt.
 
-    Every item put into write_buffer carries 'success', 'image_id' and
-    'DevID'; a successful one additionally carries 'frame' (the pixel
-    values) plus everything USB_HTPA.acquire_frame() returned ('pix',
-    'aux', 'ptat_avg', 't', 'serial_number', ...).
+    Every item put into write_buffer is the driver's frame dictionary (see
+    hspy.drivers._frame -- 'frame', 'frame_unit', 'DevID', 'serial', 't',
+    the auxiliary sensor data, ...) plus the two keys this process adds:
+    'success' and 'image_id'. An item with success=False carries only
+    those two, 'DevID' and 'serial'.
     """
 
     def __init__(self,
@@ -102,7 +113,6 @@ class USB_ClientProcess(WProcess_R1):
                  stream_cmd: bytes = b't',
                  name: str = 'usb_process',
                  lost_after_s: float = 5.0,
-                 DevID: int = -1,
                  **kwargs):
         """
         Parameters
@@ -114,13 +124,16 @@ class USB_ClientProcess(WProcess_R1):
             is deferred to _setup().
         usb_driver_kwargs : dict
             Keyword arguments to construct usb_driver_cls with, e.g.
-            {'serial_number': '...'}.
+            {'serial_number': '...', 'DevID': 0}. Everything about how a
+            frame is acquired -- and the DevID the frames are labelled
+            with -- goes in here, not into this constructor.
         write_buffer : Queue / SharedMemoryQueue
             Buffer that acquired frames are put into.
         stream_cmd : bytes
             Command that starts the stream. b't' (default) streams pixel
             values the device has already converted; b'K' streams them in
-            dK, which additionally end up in result['pix_dK'].
+            dK, which the driver then reports as frame['pix_dK'] with
+            frame_unit 'dK'.
         name : str
             Process name. Give each process a distinct name when running
             several devices.
@@ -128,11 +141,6 @@ class USB_ClientProcess(WProcess_R1):
             If no frame could be read for this long (only errors), the
             device is considered lost even if the driver did not report a
             disconnect (e.g. some Windows USB errors after unplugging).
-        DevID : int
-            Optional device number, copied into every result as
-            result['DevID'] so a consumer fed by several clients can tell
-            them apart. -1 (default) means "not set"; USB devices are
-            identified by result['serial_number'] anyway.
 
         Returns
         -------
@@ -144,7 +152,6 @@ class USB_ClientProcess(WProcess_R1):
         self.usb_driver_kwargs = usb_driver_kwargs
         self.stream_cmd = stream_cmd
         self.lost_after_s = lost_after_s
-        self.DevID = DevID
 
         # Set by the child when the device is lost; check it in the parent
         # with usb_process.device_lost.is_set()
@@ -224,7 +231,7 @@ class USB_ClientProcess(WProcess_R1):
                 self._last_error = message
             time.sleep(0.05)
 
-            result = {'success': False}
+            result = self._failed_item()
 
         else:
             if self._n_errors:
@@ -234,16 +241,14 @@ class USB_ClientProcess(WProcess_R1):
                 self._last_error = None
             self._t_last_frame = time.monotonic()
 
-            # Set success flag and store frame data
-            result = {'success': True}
-            result.update(data)
+            # The driver's frame dictionary, plus the loop state it knows
+            # nothing about. 'frame', 'DevID', 'serial' and 't' all come
+            # from the driver -- see hspy.drivers._frame.
+            result = dict(data)
+            result['success'] = True
 
-            # Canonical key every client writes, whatever the transport is
-            result['frame'] = data['pix']
-
-        # Store image_id and device number
+        # Store image_id
         result['image_id'] = self.image_id
-        result['DevID'] = self.DevID
 
         # Increment image_id
         self.image_id = self.image_id + 1
@@ -258,13 +263,18 @@ class USB_ClientProcess(WProcess_R1):
         self.device_lost.set()
         self._exit.set()
 
+    def _failed_item(self) -> dict:
+        """Item for one failed attempt: no frame, but still identifiable."""
+        return {'success': False,
+                'DevID': self.usb_driver_kwargs.get('DevID', -1),
+                'serial': self.usb_driver_kwargs.get('serial_number', '')}
+
     def _lost_item(self) -> dict:
         """Final item for the consumer: tells it that no more frames come."""
-        return {'success': False,
-                'device_lost': True,
-                'serial_number': self.usb_driver_kwargs.get('serial_number'),
-                'image_id': self.image_id,
-                'DevID': self.DevID}
+        item = self._failed_item()
+        item['device_lost'] = True
+        item['image_id'] = self.image_id
+        return item
 
     def _teardown(self):
         # Runs inside the child process once the loop has exited: stop the
@@ -299,107 +309,21 @@ class USB_ClientProcess(WProcess_R1):
         self._exit.set()
 
 
-class UDP_PickleServerProcess(RProcess_R1):
-    """
-    Multiprocessing version of UDP_PickleServer. Reads arbitrary
-    (picklable) data from an upstream buffer, in its own process, and
-    sends it out via UDP to a single peer running a UDP_PickleClient /
-    UDP_PickleClientProcess.
-
-    Since a pickled payload can easily exceed the size of a single UDP
-    datagram, it is split into numbered chunks that are reassembled by
-    the receiver. As with any data sent over UDP, delivery is not
-    guaranteed: a message of which one or more chunks are lost in transit
-    is silently dropped by the receiver.
-    """
-
-    def __init__(self,
-                 name: str,
-                 read_buffer,
-                 target_ip: str,
-                 target_port: int,
-                 **kwargs):
-        """
-        Parameters
-        ----------
-        read_buffer : Queue / SharedMemoryQueue
-            Buffer that data to be transmitted is read from.
-        target_ip, target_port : str, int
-            Address of the peer running UDP_PickleClient(Process).
-
-        Returns
-        -------
-        None.
-
-        """
-
-        self.target_ip = target_ip
-        self.target_port = target_port
-
-        super().__init__(name=name,
-                         read_buffer=read_buffer,
-                         **kwargs)
-
-    def _setup(self):
-
-        # The socket is created here, inside the child process -- not in
-        # __init__ -- so that this works regardless of multiprocessing
-        # start method ('fork', 'spawn' or 'forkserver').
-        self.target_addr = (self.target_ip, self.target_port)
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._msg_id = 0
-
-    def _target(self):
-
-        # Get data (e.g. a dict with a numpy array / pandas DataFrame)
-        # from the upstream buffer
-        data = self._get()
-
-        # Serialize it
-        payload = pkl.dumps(data)
-
-        # Split the payload into chunks that fit into a single UDP
-        # datagram
-        chunks = [payload[i:i + _PICKLE_MAX_CHUNK]
-                 for i in range(0, len(payload), _PICKLE_MAX_CHUNK)] or [b'']
-
-        chunk_count = len(chunks)
-
-        # Send every chunk in its own datagram, prefixed with a header
-        # that allows the receiver to reassemble the message
-        for chunk_index, chunk in enumerate(chunks):
-            header = struct.pack(_PICKLE_HEADER_FMT,
-                                 self._msg_id,
-                                 chunk_index,
-                                 chunk_count)
-            self._socket.sendto(header + chunk, self.target_addr)
-
-        # Increment (and wrap) the message id
-        self._msg_id = (self._msg_id + 1) % 2**32
-
-        return None
-
-    def _teardown(self):
-        # Runs inside the child process once the loop has exited. Unlike
-        # the threading version, stop() (which runs in the PARENT
-        # process) cannot reach into this socket -- it only exists in the
-        # child's memory -- so cleanup happens here instead.
-        self._socket.close()
-
-    def stop(self):
-        self._exit.set()
-
-
 class UDP_ClientProcess(WProcess_R1):
     """
-    Multiprocessing version of UDP_Client. Runs an HTPA_UDPReader in its
-    own process, binds one HTPA device, starts its continuous bytestream
-    and writes assembled frames into write_buffer.
+    Multiprocessing version of UDP_Client. Runs a UDP_HTPA driver in its
+    own process, which binds one HTPA device, starts its continuous
+    bytestream and writes assembled frames into write_buffer.
 
-    Same shape as USB_ClientProcess: the reader is built from a class +
+    Same shape as USB_ClientProcess: the driver is built from a class +
     kwargs inside the child process (see the design note at the top of
-    this module), the device is bound and the stream started in _setup(),
-    and both are undone in _teardown().
+    this module), which is also where it binds its device, since a bound
+    UDP socket must not be handed across a process boundary. The stream is
+    started in _setup() and the device released in _teardown().
+
+    Discovering and binding is the driver's job now -- UDP_HTPA does it in
+    its own open() -- so this class is only the loop and the watchdog
+    around it.
 
     Losing the device is reported ONCE; the process then puts one final
     item {'success': False, 'device_lost': True, ...} into write_buffer,
@@ -409,39 +333,36 @@ class UDP_ClientProcess(WProcess_R1):
     lost_after_s after the last good one. Other errors are printed once
     per distinct message, not on every attempt.
 
-    Every item put into write_buffer carries 'success', 'image_id' and
-    'DevID'; a successful one additionally carries 'frame'.
+    Every item put into write_buffer is the driver's frame dictionary (see
+    hspy.drivers._frame) plus 'success' and 'image_id'.
     """
 
     def __init__(self,
-                 udp_reader_cls,
-                 udp_reader_kwargs: dict,
+                 udp_driver_cls,
+                 udp_driver_kwargs: dict,
                  write_buffer,
-                 IP: str = '',
-                 DevID: int = -1,
-                 Bcast_Addr: str = '',
-                 stream_cmd: bytes = b'K',
+                 stream_cmd: bytes = None,
                  name: str = 'udp_process',
                  lost_after_s: float = 5.0,
                  first_frame_after_s: float = 15.0,
-                 first_frame_timeout: float = 5.0,
                  **kwargs):
         """
         Parameters
         ----------
-        udp_reader_cls : type
-            The HTPA_UDPReader class (not an instance!) to construct
-            inside the child process.
-        udp_reader_kwargs : dict
-            Keyword arguments to construct udp_reader_cls with, e.g.
-            {'ArrayType': 1}.
+        udp_driver_cls : type
+            The UDP_HTPA class (not an instance!) to construct inside the
+            child process.
+        udp_driver_kwargs : dict
+            Keyword arguments to construct udp_driver_cls with, e.g.
+            {'IP': '192.168.240.80'} or {'DevID': 1172, 'Bcast_Addr':
+            '192.168.240.255'}. Which device is bound, and how its frames
+            look, goes in here rather than into this constructor.
         write_buffer : Queue / SharedMemoryQueue
             Buffer that assembled frames are put into.
-        IP, DevID, Bcast_Addr : see UDP_Client (threads.py) -- same
-            binding semantics, just deferred to _setup().
-        stream_cmd : bytes
-            Command that starts the continuous bytestream. b'K' (default)
-            streams pixel values in dK.
+        stream_cmd : bytes, optional
+            Command that starts the continuous bytestream. None (default)
+            leaves the driver's own stream_cmd alone; pass one to override
+            it.
         name : str
             Process name. Give each process a distinct name when running
             several devices.
@@ -453,16 +374,9 @@ class UDP_ClientProcess(WProcess_R1):
             Budget for the FIRST frame, measured from the moment the
             stream command was sent. A device can need a while to start
             sending, which is not the same failure as a device that was
-            streaming and stopped, so it gets its own, larger budget.
-        first_frame_timeout : float
-            Socket timeout for the read that waits for the device to
-            start sending. The socket's own timeout is sized for a
-            running stream and expires long before a device has acted on
-            the stream command, which produced one spurious error per
-            start. Used until the first frame has arrived, then the
-            socket's timeout takes over again. Capped at
-            first_frame_after_s: a read in progress delays both the
-            watchdog and stop().
+            streaming and stopped, so it gets its own, larger budget. The
+            socket timeout used while waiting for it is the driver's
+            first_frame_timeout.
 
         Returns
         -------
@@ -470,22 +384,12 @@ class UDP_ClientProcess(WProcess_R1):
 
         """
 
-        # Checked here, in the parent, so a missing argument fails at
-        # construction instead of inside the child a moment later
-        if not ((DevID != -1 and len(Bcast_Addr) != 0) or len(IP) != 0):
-            raise ValueError('Either IP or DevID and Bcast_Addr of the '
-                             'device to be bound have to be specified!')
+        self.udp_driver_cls = udp_driver_cls
+        self.udp_driver_kwargs = udp_driver_kwargs
 
-        self.udp_reader_cls = udp_reader_cls
-        self.udp_reader_kwargs = udp_reader_kwargs
-
-        self.IP = IP
-        self.DevID = DevID
-        self.Bcast_Addr = Bcast_Addr
         self.stream_cmd = stream_cmd
         self.lost_after_s = lost_after_s
         self.first_frame_after_s = first_frame_after_s
-        self.first_frame_timeout = first_frame_timeout
 
         # Set by the child when the device is lost; check it in the parent
         # with udp_process.device_lost.is_set()
@@ -515,56 +419,31 @@ class UDP_ClientProcess(WProcess_R1):
 
         self.t0 = time.time()
 
-        # Watchdog reference, deliberately NOT stamped here: discovery and
-        # binding still lie ahead, and broadcast() alone always waits out
-        # its full 5 s RESPONSE_TIMEOUT. A clock started at this point is
-        # already past lost_after_s by the time the first read happens, so
-        # the very first socket timeout would be reported as a lost
-        # device. Both are stamped once the stream is really running, and
-        # _t_last_frame stays None until a frame has actually arrived.
+        # Watchdog references. Stamped once the stream is really running;
+        # _t_last_frame stays None until a frame has actually arrived, so
+        # that the wait for the first one is measured against its own,
+        # larger budget. Discovery and binding lie ahead of that and
+        # broadcast() alone always waits out its full 5 s response timeout,
+        # which a clock started here would charge against the first frame.
         self._t_stream_start = None
         self._t_last_frame = None
 
-        # The first read waits longer than the ones after it, but never
-        # longer than the budget the first frame has anyway -- the loop
-        # notices stop() and device loss only between reads.
-        self._first_read_timeout = min(self.first_frame_timeout,
-                                       self.first_frame_after_s)
-
-        # Set once the device is actually bound, so _teardown() only
-        # releases what this process really acquired
-        self._bound = False
-        self.udp_reader = None
+        self.udp_driver = None
 
         try:
-            # Construct the reader (and therefore open its socket) here,
-            # inside the child process.
-            self.udp_reader = self.udp_reader_cls(**self.udp_reader_kwargs)
+            # Construct the driver, which binds the device and therefore
+            # opens its socket, here inside the child process.
+            self.udp_driver = self.udp_driver_cls(**self.udp_driver_kwargs)
 
-            # Depending on whether the device's IP or the Device ID along
-            # with the broadcast address are provided, the process of
-            # finding and binding the corresponding htpa device differs
-            if (self.DevID != -1) and (len(self.Bcast_Addr) != 0):
-                # The reader is built fresh in this process, so it
-                # normally has to discover the device itself. Guarded
-                # anyway: broadcast() always waits out its full 5 s
-                # RESPONSE_TIMEOUT, and a reader whose kwargs already
-                # carry a device list does not need it.
-                if self.DevID not in self.udp_reader.devices.index:
-                    self.udp_reader.broadcast(self.Bcast_Addr)
-                self.udp_reader.bind_tparray(DevID=self.DevID)
-            else:
-                self.udp_reader.bind_tparray(IP=self.IP)
-
-                # Save DevID of bound device to attribute
-                devices = self.udp_reader.devices
-                self.DevID = devices[devices['IP'] == self.IP].index.item()
-
-            self._bound = True
+            # A read in progress delays both the watchdog and stop(), so
+            # the driver never waits longer for the first frame than that
+            # frame's whole budget.
+            self.udp_driver.first_frame_timeout = min(
+                self.udp_driver.first_frame_timeout,
+                self.first_frame_after_s)
 
             # Start continuous bytestream
-            self.udp_reader.start_continuous_bytestream(self.DevID,
-                                                        cmd=self.stream_cmd)
+            self.udp_driver.start_stream(self.stream_cmd)
 
             # From here on the device should be sending. This is what the
             # watchdog measures against until the first frame arrives.
@@ -576,21 +455,17 @@ class UDP_ClientProcess(WProcess_R1):
             self._put(self._lost_item())
             return
 
-        print(f"[{self.name}] Stream started for device {self.DevID}.")
+        print(f"[{self.name}] Stream started for device "
+              f"{self.udp_driver.DevID}.")
 
     def _target(self):
 
         try:
-            # Try to assemble a frame from the udp packages. Until the
-            # first one has arrived the read gets the longer
-            # first_frame_timeout: the device needs a moment to act on
-            # the stream command, which is not an error.
-            if self._t_last_frame is None:
-                udp_data = self.udp_reader.read_continuous_bytestream(
-                    self.DevID,
-                    first_frame_timeout=self._first_read_timeout)
-            else:
-                udp_data = self.udp_reader.read_continuous_bytestream(self.DevID)
+            # Try to assemble a frame from the udp packages. The driver
+            # gives the first one the longer first_frame_timeout by
+            # itself: the device needs a moment to act on the stream
+            # command, which is not an error.
+            data = self.udp_driver.acquire_frame()
 
         except Exception as e:
 
@@ -624,7 +499,7 @@ class UDP_ClientProcess(WProcess_R1):
                 self._last_error = message
             time.sleep(0.05)
 
-            result = {'success': False}
+            result = self._failed_item()
 
         else:
             if self._n_errors:
@@ -634,13 +509,13 @@ class UDP_ClientProcess(WProcess_R1):
                 self._last_error = None
             self._t_last_frame = time.monotonic()
 
-            # Set success flag and store frame
-            result = {'success': True}
-            result['frame'] = udp_data['pix']
+            # The driver's frame dictionary, plus the loop state it knows
+            # nothing about
+            result = dict(data)
+            result['success'] = True
 
-        # Store image_id and device ID
+        # Store image_id
         result['image_id'] = self.image_id
-        result['DevID'] = self.DevID
 
         # Increment image_id
         self.image_id = self.image_id + 1
@@ -649,17 +524,34 @@ class UDP_ClientProcess(WProcess_R1):
 
     def _device_lost(self, reason: str):
         """Report the loss once, flag it for the parent, end the loop."""
-        print(f"[{self.name}] Connection to device {self.DevID} LOST: "
+        print(f"[{self.name}] Connection to device {self._dev_id()} LOST: "
               f"{reason}. Continuing without it.")
         self.device_lost.set()
         self._exit.set()
 
+    def _dev_id(self) -> int:
+        """
+        The bound device's number, or what the caller asked for while the
+        driver does not exist yet (binding may be what failed).
+        """
+        driver = getattr(self, 'udp_driver', None)
+        if driver is not None:
+            return driver.DevID
+        return self.udp_driver_kwargs.get('DevID', -1)
+
+    def _failed_item(self) -> dict:
+        """Item for one failed attempt: no frame, but still identifiable."""
+        driver = getattr(self, 'udp_driver', None)
+        return {'success': False,
+                'DevID': self._dev_id(),
+                'serial': '' if driver is None else driver.serial}
+
     def _lost_item(self) -> dict:
         """Final item for the consumer: tells it that no more frames come."""
-        return {'success': False,
-                'device_lost': True,
-                'image_id': self.image_id,
-                'DevID': self.DevID}
+        item = self._failed_item()
+        item['device_lost'] = True
+        item['image_id'] = self.image_id
+        return item
 
     def _teardown(self):
         # Runs inside the child process once the loop has exited: stop the
@@ -668,24 +560,16 @@ class UDP_ClientProcess(WProcess_R1):
         self._release_device()
 
     def _release_device(self):
-        udp_reader = getattr(self, 'udp_reader', None)
-        if udp_reader is None:
+        udp_driver = getattr(self, 'udp_driver', None)
+        if udp_driver is None:
             return
-        self.udp_reader = None            # release only once
-
-        if not getattr(self, '_bound', False):
-            return
-        self._bound = False
+        self.udp_driver = None            # release only once
 
         try:
-            udp_reader.stop_continuous_bytestream(DevID=self.DevID)
-            print(f"[{self.name}] Stream stopped.")
-        except Exception as e:
-            print(f"[{self.name}] Stopping stream failed: {e}")
-
-        try:
-            # Sends the release command and closes the device's socket
-            udp_reader.release_tparray(self.DevID)
+            # Stops the stream, sends the release command and closes the
+            # device's socket
+            udp_driver.close()
+            print(f"[{self.name}] Device released.")
         except Exception as e:
             print(f"[{self.name}] Releasing device failed: {e}")
 
@@ -701,6 +585,9 @@ class I2C_ClientProcess(WProcess_R1):
     Multiprocessing version of I2C_Client. Runs an I2C_HTPA32x32d in its
     own process and writes acquired (+ converted / calibrated / LuT-mapped)
     frames into write_buffer.
+
+    Every item put into write_buffer is the driver's frame dictionary (see
+    hspy.drivers._frame) plus 'success' and 'image_id'.
     """
 
     def __init__(self,
@@ -708,11 +595,7 @@ class I2C_ClientProcess(WProcess_R1):
                  i2c_driver_kwargs: dict,
                  write_buffer,
                  lut_csv_path=None,
-                 lut_offset: int = 0,
-                 active_vdd: bool = True,
-                 blind_vdd: bool = False,
-                 applyCalib: bool = True,
-                 calcdK: bool = True,
+                 name: str = 'i2c_process',
                  **kwargs):
         """
         Parameters
@@ -724,17 +607,19 @@ class I2C_ClientProcess(WProcess_R1):
             safe, so construction is deferred to _setup().
         i2c_driver_kwargs : dict
             Keyword arguments to construct i2c_driver_cls with, e.g.
-            {'bus': 1}.
+            {'bus': 1}. Everything about how a frame is acquired --
+            active_vdd, blind_vdd, applyCalib, keep_raw -- and the
+            DevID the frames are labelled with goes in here, not into this
+            constructor.
         write_buffer : Queue / SharedMemoryQueue
             Buffer that acquired frames are put into.
         lut_csv_path : str or Path, optional
             If given, a LuT is loaded from this CSV and assigned to the
             driver inside _setup() (mirrors setting i2c_driver.LuT in the
-            threading version's calling script).
-        lut_offset : int
-            Passed through to LuT.from_csv().
-        active_vdd, blind_vdd, applyCalib, calcdK :
-            Forwarded to i2c_driver.acquire_frame() every iteration.
+            threading version's calling script). A LuT object cannot be
+            handed across a process boundary as cheaply as a path.
+        name : str
+            Process name.
 
         Returns
         -------
@@ -746,18 +631,17 @@ class I2C_ClientProcess(WProcess_R1):
         self.i2c_driver_kwargs = i2c_driver_kwargs
 
         self.lut_csv_path = lut_csv_path
-        self.lut_offset = lut_offset
 
-        self.active_vdd = active_vdd
-        self.blind_vdd = blind_vdd
-        self.applyCalib = applyCalib
-        self.calcdK = calcdK
-
-        super().__init__(name='i2c_process',
+        super().__init__(name=name,
                          write_buffer=write_buffer,
                          **kwargs)
 
     def _setup(self):
+
+        # Ignore Ctrl+C in this process: the parent catches it and calls
+        # stop(), so that the loop ends between two frames rather than in
+        # the middle of a bus transaction.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
 
         # Opens the I2C bus (SMBus handle) here, inside the child process.
         # I2C_HTPA32x32d.__init__ already calls open() + init() itself.
@@ -765,34 +649,50 @@ class I2C_ClientProcess(WProcess_R1):
 
         if self.lut_csv_path is not None:
             lut = LuT()
-            lut.from_csv(self.lut_csv_path, offset=self.lut_offset)
+            lut.from_csv(self.lut_csv_path)
             self.i2c_driver.LuT = lut
 
         # Set image_id counter
         self.image_id = 0
+
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
 
         # Set time
         self.t0 = time.time()
 
     def _target(self):
 
-        # Dictionary for storing results in
-        result = {}
-
         try:
             # Acquire and process one frame from the sensor
-            data = self.i2c_driver.acquire_frame(active_vdd=self.active_vdd,
-                                                  blind_vdd=self.blind_vdd,
-                                                  applyCalib=self.applyCalib,
-                                                  calcdK=self.calcdK)
+            data = self.i2c_driver.acquire_frame()
 
-            # Set success flag and store frame data
-            result['success'] = True
-            result.update(data)
         except Exception as e:
-            # Set success flag to False in case of failure
-            result['success'] = False
-            print(f"[{self.name}] {e}")
+            # Print each distinct message once rather than on every
+            # iteration, and don't spin
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+            time.sleep(0.05)
+
+            result = {'success': False,
+                      'DevID': self.i2c_driver_kwargs.get('DevID', -1),
+                      'serial': ''}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Acquiring frames again "
+                      f"({self._n_errors} failed attempt(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+
+            # The driver's frame dictionary, plus the loop state it knows
+            # nothing about
+            result = dict(data)
+            result['success'] = True
 
         # Store image_id
         result['image_id'] = self.image_id
@@ -802,11 +702,353 @@ class I2C_ClientProcess(WProcess_R1):
 
         return result
 
+    def _teardown(self):
+        # Runs inside the child process once the loop has exited. The
+        # driver was built here, so it is also released here -- unlike the
+        # threading version, where it belongs to the caller.
+        i2c_driver = getattr(self, 'i2c_driver', None)
+        if i2c_driver is None:
+            return
+        self.i2c_driver = None            # release only once
+        try:
+            i2c_driver.close()
+            print(f"[{self.name}] Device released.")
+        except Exception as e:
+            print(f"[{self.name}] Releasing device failed: {e}")
+
     def stop(self):
         self._exit.set()
 
 
+class SPI_ClientProcess(WProcess_R1):
+    """
+    Multiprocessing version of SPI_Client. Runs an SPI_HTPA160x120dR1 in
+    its own process and writes acquired (+ converted / calibrated /
+    LuT-mapped) frames into write_buffer.
 
+    Same shape as I2C_ClientProcess, for the same reason: an open spidev
+    handle must not be duplicated into a child process, so the driver is
+    built from a class + kwargs inside _setup().
+
+    Every item put into write_buffer is the driver's frame dictionary (see
+    hspy.drivers._frame) plus 'success' and 'image_id'.
+    """
+
+    def __init__(self,
+                 spi_driver_cls,
+                 spi_driver_kwargs: dict,
+                 write_buffer,
+                 lut_csv_path=None,
+                 name: str = 'spi_process',
+                 rt_priority: Optional[int] = None,
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        spi_driver_cls : type
+            The SPI_HTPA160x120dR1 class (not an instance!) to construct
+            inside the child process.
+        spi_driver_kwargs : dict
+            Keyword arguments to construct spi_driver_cls with, e.g.
+            {'bus': 0, 'device': 0}. Everything about how a frame is
+            acquired -- eloff_every, applyCalib, keep_raw -- and
+            the DevID the frames are labelled with goes in here, not into
+            this constructor.
+        write_buffer : Queue / SharedMemoryQueue
+            Buffer that acquired frames are put into.
+        lut_csv_path : str or Path, optional
+            If given, a LuT is loaded from this CSV and assigned to the
+            driver inside _setup().
+        name : str
+            Process name.
+        rt_priority : int, optional
+            Real-time priority (SCHED_FIFO, 1..99) of this process, set
+            inside it. Keep it below 50, the priority of the kernel's
+            threaded interrupt handlers. A process of its own has its own
+            GIL, so neither the scheduler nor other Python threads can
+            delay a conversion START: the time between conversions stays
+            constant, which keeps block 0 (the top and bottom rows) from
+            flickering. Needs the permission, e.g. a line
+            '<user> - rtprio 50' in /etc/security/limits.d/; without it a
+            warning is printed and the process runs at normal priority.
+            None (default): normal priority.
+
+        Returns
+        -------
+        None.
+
+        """
+
+        self.rt_priority = rt_priority
+        self.spi_driver_cls = spi_driver_cls
+        self.spi_driver_kwargs = spi_driver_kwargs
+
+        self.lut_csv_path = lut_csv_path
+
+        super().__init__(name=name,
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _setup(self):
+
+        # Ignore Ctrl+C in this process: the parent catches it and calls
+        # stop(), so that the loop ends between two frames rather than in
+        # the middle of a bus transaction.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        # Runs inside the child process: pid 0 is its calling thread
+        if self.rt_priority is not None:
+            try:
+                os.sched_setscheduler(0, os.SCHED_FIFO,
+                                      os.sched_param(self.rt_priority))
+            except (AttributeError, OSError) as e:
+                print(f"[{self.name}] Could not set real-time priority "
+                      f"{self.rt_priority} ({e}); running at normal "
+                      f"priority. Conversion timing and thus the top and "
+                      f"bottom rows may jitter.")
+
+        # Opens the SPI device here, inside the child process.
+        # SPI_HTPA160x120dR1.__init__ already calls open() + init() itself.
+        self.spi_driver = self.spi_driver_cls(**self.spi_driver_kwargs)
+
+        if self.lut_csv_path is not None:
+            lut = LuT()
+            lut.from_csv(self.lut_csv_path)
+            self.spi_driver.LuT = lut
+
+        # Set image_id counter
+        self.image_id = 0
+
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
+        # Set time
+        self.t0 = time.time()
+
+    def _acquire(self) -> dict:
+        """One frame from the driver; SPI_AcquisitionProcess reads raw ones."""
+        return self.spi_driver.acquire_frame()
+
+    def _target(self):
+
+        try:
+            # Acquire (and process) one frame from the sensor
+            data = self._acquire()
+
+        except Exception as e:
+            # Print each distinct message once rather than on every
+            # iteration, and don't spin
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+            time.sleep(0.05)
+
+            result = {'success': False,
+                      'DevID': self.spi_driver_kwargs.get('DevID', -1),
+                      'serial': ''}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Acquiring frames again "
+                      f"({self._n_errors} failed attempt(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+
+            # The driver's frame dictionary, plus the loop state it knows
+            # nothing about
+            result = dict(data)
+            result['success'] = True
+
+        # Store image_id
+        result['image_id'] = self.image_id
+
+        # Increment image_id
+        self.image_id = self.image_id + 1
+
+        return result
+
+    def _teardown(self):
+        # Runs inside the child process once the loop has exited. The
+        # driver was built here, so it is also released here.
+        spi_driver = getattr(self, 'spi_driver', None)
+        if spi_driver is None:
+            return
+        self.spi_driver = None            # release only once
+        try:
+            spi_driver.close()
+            print(f"[{self.name}] Device released.")
+        except Exception as e:
+            print(f"[{self.name}] Releasing device failed: {e}")
+
+    def stop(self):
+        self._exit.set()
+
+
+class SPI_AcquisitionProcess(SPI_ClientProcess):
+    """
+    First stage of a two-process SPI pipeline: only talks to the sensor.
+
+    SPI_ClientProcess runs conversion, readout, calibration and LuT of a
+    frame one after the other, so the sensor waits while a frame is being
+    processed. This process writes the raw bytes of every frame
+    (SPI_HTPA160x120dR1.acquire_raw(), about 42 kB) into write_buffer and
+    starts the next frame right away; an SPI_ProcessingProcess reading
+    that buffer turns them into frame dictionaries on another core. The
+    frame period becomes the longer of the two stages instead of their sum.
+
+    Only the acquisition process can read the calibration from the flash,
+    so once the device is open it puts a pickled, hardware-free copy of
+    its driver (calibration, LuT, options) into processor_queue, where
+    SPI_ProcessingProcess picks it up::
+
+        acq  = SPI_AcquisitionProcess(SPI_HTPA160x120dR1, kwargs, raw_buffer)
+        proc = SPI_ProcessingProcess(acq.processor_queue, raw_buffer,
+                                     frame_buffer)
+
+    Every item put into write_buffer is the dict of acquire_raw() plus
+    'success' and 'image_id', or {'success': False, ...} like
+    SPI_ClientProcess on a failed frame.
+    """
+
+    def __init__(self,
+                 spi_driver_cls,
+                 spi_driver_kwargs: dict,
+                 write_buffer,
+                 name: str = 'spi_acquisition_process',
+                 **kwargs):
+
+        # Hands the driver over to SPI_ProcessingProcess. Created here, in
+        # the parent, so that both children receive the same queue.
+        self.processor_queue = MPQueue(maxsize=1)
+
+        super().__init__(spi_driver_cls=spi_driver_cls,
+                         spi_driver_kwargs=spi_driver_kwargs,
+                         write_buffer=write_buffer,
+                         lut_csv_path=None,
+                         name=name,
+                         **kwargs)
+
+    def _setup(self):
+        super()._setup()
+
+        # Pickled here rather than by the queue's feeder thread, which would
+        # do it concurrently with the first acquire_raw() calls
+        self.processor_queue.put(pkl.dumps(self.spi_driver,
+                                           protocol=pkl.HIGHEST_PROTOCOL))
+
+        # Do not let this process hang on exit if nobody ever reads it
+        self.processor_queue.cancel_join_thread()
+
+    def _acquire(self) -> dict:
+        return self.spi_driver.acquire_raw()
+
+
+class SPI_ProcessingProcess(RWProcess_R1):
+    """
+    Second stage of a two-process SPI pipeline, see SPI_AcquisitionProcess:
+    reads raw frames from read_buffer and writes the frame dictionaries of
+    hspy.drivers._frame (plus 'success' and 'image_id') into write_buffer -
+    the same items SPI_ClientProcess writes.
+    """
+
+    def __init__(self,
+                 processor_queue,
+                 read_buffer,
+                 write_buffer,
+                 lut_csv_path=None,
+                 name: str = 'spi_processing_process',
+                 **kwargs):
+        """
+        Parameters
+        ----------
+        processor_queue : multiprocessing.Queue
+            SPI_AcquisitionProcess.processor_queue, the driver copy arrives
+            through it.
+        read_buffer : Queue / SharedMemoryQueue
+            The write_buffer of the SPI_AcquisitionProcess.
+        write_buffer : Queue / SharedMemoryQueue
+            Buffer the processed frames are put into.
+        lut_csv_path : str or Path, optional
+            If given, a LuT is loaded from this CSV and replaces the one the
+            driver found for the table number in its flash.
+        name : str
+            Process name.
+        """
+        self.processor_queue = processor_queue
+        self.lut_csv_path = lut_csv_path
+
+        super().__init__(name=name,
+                         read_buffer=read_buffer,
+                         write_buffer=write_buffer,
+                         **kwargs)
+
+    def _setup(self):
+
+        # Ignore Ctrl+C in this process: the parent catches it and calls stop()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        # Wait for the driver copy of the acquisition process. It only
+        # arrives once that process has opened and initialised the sensor.
+        self.spi_processor = None
+        while not self._exit.is_set():
+            try:
+                self.spi_processor = pkl.loads(
+                    self.processor_queue.get(timeout=self.get_timeout))
+                break
+            except queue.Empty:
+                continue
+
+        if self.spi_processor is not None and self.lut_csv_path is not None:
+            lut = LuT()
+            lut.from_csv(self.lut_csv_path)
+            self.spi_processor.LuT = lut
+
+        # Error bookkeeping: print each distinct error once
+        self._last_error = None
+        self._n_errors = 0
+
+    def _target(self):
+
+        item = self._get()
+
+        # A failed acquisition is passed on unchanged
+        if not item.get('success', False):
+            return item
+
+        image_id = item.pop('image_id')
+        del item['success']
+
+        try:
+            data = self.spi_processor.process_raw(item)
+
+        except Exception as e:
+            # Print each distinct message once rather than on every frame
+            self._n_errors += 1
+            message = str(e)
+            if message != self._last_error:
+                print(f"[{self.name}] {message}")
+                self._last_error = message
+
+            result = {'success': False,
+                      'DevID': self.spi_processor.DevID,
+                      'serial': ''}
+
+        else:
+            if self._n_errors:
+                print(f"[{self.name}] Processing frames again "
+                      f"({self._n_errors} failed frame(s) before).")
+                self._n_errors = 0
+                self._last_error = None
+
+            result = dict(data)
+            result['success'] = True
+
+        result['image_id'] = image_id
+
+        return result
 
 
 class UDP_PickleServerProcess(RProcess_R1):
@@ -1131,15 +1373,11 @@ class ImshowProcess(RProcess_R1):
             cv2.waitKey(1)
             return
 
-        # 'frame' is what every *_Client writes; 'pix_dK' / 'pix' are the
-        # per-driver keys the I2C/SPI clients still use
-        if 'frame' in data.keys():
-            frame = data['frame']
-        elif 'pix_dK' in data.keys():
-            frame = data['pix_dK']
-        else:
-            frame = data['pix']
-            
+        # Every driver guarantees 'frame': the best pixel stage it
+        # produced, with data['frame_unit'] saying what it is (see
+        # hspy.drivers._frame)
+        frame = data['frame']
+
         
         # if 'inference' in data.keys():
         #     if data['inference']['PreprocEngAWA']['frame'] is not None:
@@ -1203,34 +1441,30 @@ class ImshowProcess(RProcess_R1):
             annotations.loc[annotations['label'] == 1, 'confirmed'] = True
             bboxes = annotations
             annot_exist = True
-        # print('db6')
         if annot_exist:
-            # print('db7')
             font = cv2.FONT_HERSHEY_SIMPLEX
             fontScale = 0.4
             fontColor = (255, 255, 0)
             thickness = 1
             lineType = 2
-            # print('db8')
+
             for b in bboxes.index:
-                # print('db9')
                 box = bboxes.loc[[b]]
                 
                 if box['confirmed'].item() != True:
                     continue
-                # print('db1')
                 x, y = int(box['xtl'].item()), int(box['ytl'].item())
                 w = int(box['xbr'].item()) - int(box['xtl'].item())
                 h = int(box['ybr'].item()) - int(box['ytl'].item())
-                # print('db2')
+
                 # Scale coordinates
                 x = int(sf * x); y = int(sf * y); w = int(sf * w); h = int(sf * h)
-                # print('db3')
+
                 frame = cv2.rectangle(frame,
                                       (x, y),
                                       (x + w, y + h),
                                       (255, 255, 0), 1)
-                # print('db4')
+                
                 # Write score if it exists
                 if box['score'].item() != -99:
                     score = f"{box['score'].item():.2}"
@@ -1276,21 +1510,26 @@ class ImshowProcess(RProcess_R1):
         # PTAT plot below the image                                      # ADDED
         if self.plot_ptat:                                               # ADDED
             frame = self._add_ptat_plot(frame, data)                     # ADDED
-        # print('db6')
+
         cv2.imshow(self.window_name, frame)
         cv2.waitKey(1)
-        # print('db7')
+
 
     def _add_ptat_plot(self, frame, data):                               # ADDED
         """Append data['ptat_avg'] to the history and stack the plot
-        below the image. The plot is a third of the image's height."""
-        if 'ptat_avg' in data:
+        below the image. The plot is a third of the image's height.
+
+        Every frame carries 'ptat_avg' now, but it is nan for an array type
+        that has no PTAT, so the value itself decides whether there is
+        anything to plot."""
+        ptat_avg = data.get('ptat_avg', np.nan)
+        if np.isfinite(ptat_avg):
             # Time axis: seconds since the first frame, from the frame's
             # own timestamp if it has one
             t = data['t'].timestamp() if hasattr(data.get('t'), 'timestamp') else time.time()
             if self._t_first is None:
                 self._t_first = t
-            self.ptat_plot.add(t - self._t_first, data['ptat_avg'])
+            self.ptat_plot.add(t - self._t_first, ptat_avg)
         panel = self.ptat_plot.render(frame.shape[1], frame.shape[0] // 3)
         return np.vstack([frame, panel])
 
@@ -1796,9 +2035,14 @@ class PlotTimeSeries_Process(RProcess_R1):
              'eps': '-',
              'trans': '-'}
  
-    # Keys in the incoming dicts that are bookkeeping, not data to plot
+    # Keys in the incoming dicts that are bookkeeping, not data to plot.
+    # Includes the scalar identity keys of the hspy.drivers._frame dict, so
+    # that pointing this at an HTPA client plots 'Tamb' and 'ptat_avg' but
+    # not the device's array type or its monotonic timestamp. The array
+    # values of a frame are skipped anyway -- only scalars are plotted.
     _META_KEYS = {'success', 'timestamp', 'sample_id', 'image_id',
-                  'device_lost', 'port', 'serial_number'}
+                  'device_lost', 'port', 'serial_number',
+                  'ArrayType', 'DevID', 't_mono'}
  
     def __init__(self,
                  name: str,

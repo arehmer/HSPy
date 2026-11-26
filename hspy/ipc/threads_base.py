@@ -12,8 +12,9 @@ from queue import Queue
 import time
 import types
 
-from hspy.ipc.misc import (_new_write_profile, _print_profile_report,
-                           drop_oldest_put, _GET_TIMEOUT_S)
+from hspy.ipc.misc import (write_profile, read_profile,
+                           _print_profile_report, drop_oldest_put,
+                           _GET_TIMEOUT_S)
 
 class RWThread_R1(Thread):
     """
@@ -27,6 +28,8 @@ class RWThread_R1(Thread):
                  read_buffer:Queue,
                  write_buffer:Queue,
                  get_timeout: float = _GET_TIMEOUT_S,
+                 profile: bool = False,
+                 profile_every: int = 50,
                  **kwargs):
 
         super().__init__(target = self._target,
@@ -40,6 +43,11 @@ class RWThread_R1(Thread):
         # how long stop() takes to be noticed while no data arrives.
         self.get_timeout = get_timeout
 
+        # See WThread_R1 / RWProcess_R1. 'target' times waiting for the
+        # upstream item AND processing it, 'put' the downstream write.
+        self.profile = profile
+        self.profile_every = profile_every
+
         self._exit = Event()
 
         self.daemon = True  # dies automatically if main thread exits
@@ -49,17 +57,41 @@ class RWThread_R1(Thread):
 
     def run(self):
 
+        if self.profile:
+            prof = write_profile()
+            prof_i = 0
+            prof_last_t = time.perf_counter()
+
         # Check if thread has been stopped
         while not self._exit.is_set():
 
             try:
+                if self.profile:
+                    t_cycle_start = time.perf_counter()
 
-                # Process data (the subclass reads read_buffer itself,
-                # through self._get())
-                result = self._target()
+                    t0 = time.perf_counter()
+                    result = self._target()
+                    t1 = time.perf_counter()
 
-                # Put result into downstream buffer
-                self.write_buffer.put(result)
+                    self._put(result)
+                    t2 = time.perf_counter()
+
+                    prof['target'].add(t1 - t0)
+                    prof['put'].add(t2 - t1)
+                    prof['cycle'].add(t_cycle_start - prof_last_t)
+                    prof_last_t = t_cycle_start
+
+                    prof_i += 1
+                    if prof_i % self.profile_every == 0:
+                        _print_profile_report(self.name, prof)
+
+                else:
+                    # Process data (the subclass reads read_buffer itself,
+                    # through self._get())
+                    result = self._target()
+
+                    # Put result into downstream buffer
+                    self._put(result)
 
             except queue.Empty:
                 # Nothing arrived within get_timeout. Let the subclass do
@@ -71,6 +103,20 @@ class RWThread_R1(Thread):
 
             except Exception as e:
                 print(f"[{self.name}] {e}")
+
+    def _put(self, result):
+        """
+        Blocking put into write_buffer that still notices stop(): waits in
+        steps of get_timeout and gives the item up once the thread is
+        stopped, so join() does not hang on a full buffer whose consumer
+        has already ended.
+        """
+        while not self._exit.is_set():
+            try:
+                self.write_buffer.put(result, timeout=self.get_timeout)
+                return
+            except queue.Full:
+                continue
 
     def _get(self, timeout: float = None):
         """
@@ -289,7 +335,7 @@ class WThread_R1(Thread):
             self._exit.set()
 
         if self.profile:
-            prof = _new_write_profile()
+            prof = write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -422,6 +468,8 @@ class RThread_R1(Thread):
                  name : str,
                  read_buffer:Queue,
                  get_timeout: float = _GET_TIMEOUT_S,
+                 profile: bool = False,
+                 profile_every: int = 50,
                  **kwargs):
         
         # Check input arguments
@@ -444,6 +492,11 @@ class RThread_R1(Thread):
         # how long stop() takes to be noticed while no data arrives.
         self.get_timeout = get_timeout
 
+        # See RProcess_R1. Subclasses that override run() (e.g. Imshow)
+        # ignore this.
+        self.profile = profile
+        self.profile_every = profile_every
+
         # Standard attributes
         self._exit = Event()
         self.daemon = True  # dies automatically if main thread exits
@@ -452,13 +505,34 @@ class RThread_R1(Thread):
 
     def run(self):
 
+        if self.profile:
+            prof = read_profile()
+            prof_i = 0
+            prof_last_t = time.perf_counter()
+
         # Check if thread has been stopped
         while not self._exit.is_set():
 
             try:
-                # Execute target function (reads read_buffer itself,
-                # through self._get())
-                result = self._target()
+                if self.profile:
+                    t_cycle_start = time.perf_counter()
+
+                    t0 = time.perf_counter()
+                    self._target()
+                    t1 = time.perf_counter()
+
+                    prof['target'].add(t1 - t0)
+                    prof['cycle'].add(t_cycle_start - prof_last_t)
+                    prof_last_t = t_cycle_start
+
+                    prof_i += 1
+                    if prof_i % self.profile_every == 0:
+                        _print_profile_report(self.name, prof)
+
+                else:
+                    # Execute target function (reads read_buffer itself,
+                    # through self._get())
+                    result = self._target()
 
             except queue.Empty:
                 # Nothing arrived within get_timeout. Let the subclass do

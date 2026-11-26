@@ -28,6 +28,7 @@ there, not in __init__. __init__ still runs in the *parent* process (the
 same as for any Process subclass) and should only store picklable
 configuration (class references, kwarg dicts, paths, numbers, ...).
 """
+from abc import ABCMeta, abstractmethod
 
 from multiprocessing import Process, Event
 from multiprocessing import Queue as MPQueue
@@ -46,7 +47,7 @@ import time
 # imports from this module keep working.
 
 from hspy.ipc.misc import (_ProfileStat, _print_profile_report,
-                           _new_write_profile, _new_read_profile,
+                           write_profile, read_profile,
                            drop_oldest_put, _GET_TIMEOUT_S)
 
 
@@ -280,7 +281,7 @@ class WProcess_R1(Process):
             self._exit.set()
 
         if self.profile:
-            prof = _new_write_profile()
+            prof = write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -341,9 +342,9 @@ class WProcess_R1(Process):
         process once the loop has exited (e.g. closing a device)."""
         pass
 
+    @abstractmethod
     def _target(self):
         """Override in subclass to produce data."""
-        raise NotImplementedError
 
     def stop(self):
         self._exit.set()
@@ -387,11 +388,10 @@ class RProcess_R1(Process):
         pass
 
     def run(self):
-
         self._setup()
 
         if self.profile:
-            prof = _new_read_profile()
+            prof = read_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -453,10 +453,10 @@ class RProcess_R1(Process):
     def _teardown(self):
         pass
 
+    @abstractmethod
     def _target(self):
         """Override in subclass. Should read from self.read_buffer via
         self._get()."""
-        raise NotImplementedError
 
     def stop(self):
         self._exit.set()
@@ -509,7 +509,7 @@ class RWProcess_R1(Process):
         self._setup()
 
         if self.profile:
-            prof = _new_write_profile()
+            prof = write_profile()
             prof_i = 0
             prof_last_t = time.perf_counter()
 
@@ -581,10 +581,10 @@ class RWProcess_R1(Process):
     def _teardown(self):
         pass
 
+    @abstractmethod
     def _target(self):
         """Override in subclass. Should read from self.read_buffer via
         self._get()."""
-        raise NotImplementedError
 
     def stop(self):
         self._exit.set()

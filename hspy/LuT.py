@@ -4,15 +4,22 @@ Created on Thu Feb  8 16:11:36 2024
 
 @author: rehmer
 """
-from typing import List
+import csv
+import re
+from datetime import datetime
+from typing import List, Optional
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
+from openpyxl.utils import get_column_letter
 from warnings import warn
 
+
+# Folder with the LuTs exported from LookUpTablesHTPA.xlsm by to_csv()
+LUT_FOLDER = Path(__file__).parent / 'luts'
 
 
 class LuT:
@@ -20,8 +27,10 @@ class LuT:
     def __init__(self,**kwargs):
         
         self._LuT = None                    # Look-up-Table as pd.DataFrame
-        self._LuTGridInterpolator = None    # SciPy Regular Grid Interpolator, generated automatically  
-        
+        self._LuTGridInterpolator = None    # SciPy Regular Grid Interpolator, generated automatically
+        self.meta = None                    # Key-value pairs above the LuT, set by from_HTPAxls()
+        self.sheet_name = None              # Sheet name in LookUpTablesHTPA.xlsm, set by from_HTPAxls()
+
         pass
     
     @property
@@ -43,7 +52,32 @@ class LuT:
             raise TypeError(f'interpol is not type {type(RegularGridInterpolator)} but {type(interpol)}.')
         else:
             self._LuTGridInterpolator = interpol
-    
+
+    @classmethod
+    def from_table_number(cls,table_number:int,
+                          folder=LUT_FOLDER) -> Optional['LuT']:
+        """
+        Loads the LuT <folder>/LuTNr<table_number>_<sheet_name>.csv written
+        by to_csv(). Returns None if there is no such file and raises
+        ValueError if there is more than one.
+        """
+
+        matches = sorted(Path(folder).glob(f'LuTNr{table_number}_*.csv'))
+
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            raise ValueError(
+                f'{len(matches)} LuTs with table number {table_number} in '
+                f'{folder}: {", ".join(m.name for m in matches)}. Load the '
+                'right one with from_csv() and assign it to the driver.')
+
+        lut = cls()
+        lut.from_csv(matches[0])
+
+        return lut
+
     def from_df(self,df):
         
         # Set class property        
@@ -52,19 +86,41 @@ class LuT:
         # Create LuTGridInterpolator for fast bilinear interpolation
         self._create_LuTGridInterpolator()
         
-    def from_csv(self,csv_path,offset):
-        
-        self.offset = offset
-        
+    def from_csv(self,csv_path):
+
+        # Header block written by to_csv(): key,value lines up to the first
+        # empty line. Files without an empty line contain only the table.
+        with open(csv_path,newline='',encoding='utf-8-sig') as f:
+            rows = list(csv.reader(f))
+        blank = next((i for i,row in enumerate(rows) if not row),None)
+
+        if blank is not None:
+
+            def parse(v):
+                if v == '':
+                    return None
+                for conv in (int,float,datetime.fromisoformat):
+                    try:
+                        return conv(v)
+                    except ValueError:
+                        pass
+                return v
+
+            self.meta = {key:parse(value) for key,value in rows[:blank]}
+
+            # Sheet name from file name LuTNr<Tablenumber>_<sheet_name>.csv
+            match = re.fullmatch(r'LuTNr\d+_(.+)',Path(csv_path).stem)
+            if match:
+                self.sheet_name = match.group(1)
+
         # Import data
-        LuT = pd.read_csv(csv_path, sep=',',header=0,index_col = 0)
+        LuT = pd.read_csv(csv_path, sep=',',header=0,index_col = 0,
+                          skiprows = 0 if blank is None else blank+1,
+                          float_precision = 'round_trip')
         
         # Convert column header to int
         LuT.columns = np.array([int(c) for c in LuT.columns])
-        
-        # Subtract offset
-        LuT.index = LuT.index - offset
-        
+
         # Set class property   
         self.LuT = LuT
         
@@ -76,10 +132,121 @@ class LuT:
         xlsx_standard = Path('T:/Projekte/HTPA8x8_16x16_32x31/Datasheet/LookUpTablesHTPA.xlsm')
         
         xlsx_path = kwargs.pop('xlsx_path',xlsx_standard)
+
+        raw = pd.read_excel(xlsx_path,sheet_name=sheet_name,header=None,
+                            dtype=object)
+
+        # Detect table layout, explicitly passed kwargs take precedence
+        layout = self._detect_HTPAxls_layout(raw,sheet_name)
+        kwargs = {**layout,**kwargs}
+
         self.from_xlsx(xlsx_path,sheet_name,**kwargs)
+
+        # Key-value pairs above the table
+        self.meta = self._read_HTPAxls_meta(raw,layout['skiprows'])
+        self.sheet_name = sheet_name
+
         print(sheet_name + ' successfully loaded.')
         return None
-        
+
+    @staticmethod
+    def _read_HTPAxls_meta(raw,header) -> dict:
+        """
+        Reads the key-value pairs in columns A:B and H:I above the 'V' row
+        (or above the table header if there is no 'V' row). Empty values
+        become None.
+        """
+
+        colA = raw.iloc[:header,0].map(lambda v: str(v).strip()
+                                       if pd.notna(v) else '')
+        stop = next((r for r in range(header) if colA[r] == 'V'),header)
+
+        meta = {}
+        for c in [0,7]:
+            for r in range(stop):
+                key = raw.iat[r,c]
+                if pd.isna(key):
+                    continue
+                value = raw.iat[r,c+1]
+                meta[str(key).strip()] = None if pd.isna(value) else value
+
+        return meta
+
+    @staticmethod
+    def _detect_HTPAxls_layout(raw,sheet_name) -> dict:
+        """
+        Locates the LuT in a sheet of LookUpTablesHTPA.xlsm and returns the
+        keyword arguments skiprows, header, index_col and usecols for
+        from_xlsx().
+
+        The table is expected to consist of a header row (Ud, Ud_norm, br,
+        Ta values, br) followed by data rows (Ud, Ud_norm, '{', To values,
+        '}') that extend to the end of the sheet. Raises ValueError on any
+        deviation (gaps, trailing rows, non-numeric values, non-ascending Ud).
+        """
+
+        def cell(r,c):
+            return f"'{sheet_name}'!{get_column_letter(c+1)}{r+1}"
+
+        def to_num(v):
+            # Accepts numbers and strings like '1234,', returns None otherwise
+            if isinstance(v,str):
+                try:
+                    return float(v.strip().rstrip(','))
+                except ValueError:
+                    return None
+            if isinstance(v,(int,float)) and not pd.isna(v):
+                return v
+            return None
+
+        def is_bracket(v,b):
+            return isinstance(v,str) and v.strip().startswith(b)
+
+        if raw.shape[1] < 4:
+            raise ValueError(f"No LuT found in sheet '{sheet_name}'.")
+
+        # First data row: numeric Ud in column A and '{' in column C
+        first = next((r for r in range(len(raw))
+                      if to_num(raw.iat[r,0]) is not None
+                      and is_bracket(raw.iat[r,2],'{')),None)
+        if first is None or first == 0:
+            raise ValueError(f"No LuT found in sheet '{sheet_name}'.")
+        header = first - 1
+
+        # Ta columns end at the closing bracket of the first data row
+        close = next((c for c in range(3,raw.shape[1])
+                      if is_bracket(raw.iat[first,c],'}')),None)
+        if close is None or close < 4:
+            raise ValueError(f'No closing bracket found in row {cell(first,0)}.')
+
+        # Header must hold the Ta values
+        for c in range(3,close):
+            if to_num(raw.iat[header,c]) is None:
+                raise ValueError(f'Ta value expected in {cell(header,c)}, ' +\
+                                 f'found {raw.iat[header,c]!r}.')
+
+        # Every row from first to the end of the sheet must be a data row
+        Ud_prev = None
+        for r in range(first,len(raw)):
+            for c in [0,1] + list(range(3,close)):
+                if to_num(raw.iat[r,c]) is None:
+                    raise ValueError(f'Numeric value expected in ' +\
+                                     f'{cell(r,c)}, found {raw.iat[r,c]!r}.')
+            for c,b in [(2,'{'),(close,'}')]:
+                if not is_bracket(raw.iat[r,c],b):
+                    raise ValueError(f"'{b}' expected in {cell(r,c)}, " +\
+                                     f'found {raw.iat[r,c]!r}.')
+            Ud = to_num(raw.iat[r,0])
+            if Ud_prev is not None and Ud <= Ud_prev:
+                raise ValueError(f'Ud not strictly ascending in {cell(r,0)}' +\
+                                 f' ({Ud_prev:g} followed by {Ud:g}).')
+            Ud_prev = Ud
+
+        return {'skiprows':header,
+                'header':0,
+                'index_col':0,
+                'usecols':[0] + list(range(3,close))}
+
     def from_xlsx(self,xlsx_path,sheet_name,**kwargs):
         
         index_col = kwargs.pop('index_col',0)
@@ -97,7 +264,8 @@ class LuT:
         
         # Delete all commata
         df = df.replace(',','',regex=True)
-        
+        df.columns = [int(str(c).rstrip(',')) for c in df.columns]
+
         # Cast all columns to int
         df = df.astype(np.int32)
         
@@ -145,14 +313,51 @@ class LuT:
         # if not Ta_grid.shape == Ud_grid.shape == To_elements.shape:
         #     raise ValueError('Shapes of LuT and created Ta-Ud-grids are not consistent.')
         
-        # Create RegularGridInterpolator
+        # Create RegularGridInterpolator. Query points outside the LuT give
+        # NaN instead of a ValueError for the whole call, see _calc_To()
         interp = RegularGridInterpolator((Ud_elements,Ta_elements),
-                                         To_elements)
+                                         To_elements,
+                                         bounds_error=False,
+                                         fill_value=np.nan)
         
         # Assign to class property
         self.LuTGridInterpolator = interp
+
+        # Plain grid arrays for calc_To_const_Ta()
+        self._Ud_grid = np.asarray(Ud_elements, dtype=np.float64)
+        self._Ta_grid = np.asarray(Ta_elements, dtype=np.float64)
+        self._To_grid = np.asarray(To_elements, dtype=np.float64)
+
+        # Ud step if the Ud grid is equidistant (true for the Heimann LuTs,
+        # V-Equi), else None
+        steps = np.diff(self._Ud_grid)
+        self._Ud_step = steps[0] if np.allclose(steps, steps[0]) else None
     
     
+    def to_csv(self,folder) -> Path:
+        """
+        Writes the header dictionary (key,value per line), an empty line and
+        the LuT (index Ud, columns Ta) to
+        <folder>/LuTNr<Tablenumber>_<sheet_name>.csv. Requires a LuT loaded
+        with from_HTPAxls(). Returns the path of the written file.
+        """
+
+        if self.meta is None or self.sheet_name is None:
+            raise ValueError('to_csv() requires a LuT loaded with ' +\
+                             'from_HTPAxls().')
+
+        csv_path = Path(folder) / \
+            f"LuTNr{self.meta['Tablenumber']}_{self.sheet_name}.csv"
+
+        with open(csv_path,'w',newline='',encoding='utf-8') as f:
+            writer = csv.writer(f,lineterminator='\n')
+            for key,value in self.meta.items():
+                writer.writerow([key,'' if value is None else value])
+            writer.writerow([])
+            self.LuT.to_csv(f,lineterminator='\n')
+
+        return csv_path
+
     def to_xlsx(self,xlsx_path):
         
         # Load LuT
@@ -438,8 +643,50 @@ class LuT:
                 raise ValueError(f"Index 'Tamb0' not in {qpoints.columns}")
             
             return self._calc_To( qpoints[['Ud','Tamb0']].values)
-                       
-            
+
+    def calc_To_const_Ta(self, Ud: np.ndarray, Ta: float) -> np.ndarray:
+        """
+        Same result as calc_To() for the query points (Ud_i, Ta), but for one
+        ambient temperature Ta (dK) shared by all of them, as in one frame.
+
+        The bilinear interpolation of the LuT then separates: first one
+        linear interpolation along Ta, giving a single LuT column, then a
+        linear interpolation of every Ud along that column. On an equidistant
+        Ud grid the interval of each Ud is computed directly instead of
+        searched for, otherwise np.interp does the search. About 9x
+        (equidistant) resp. 1.6x faster than evaluating the
+        RegularGridInterpolator at every point. Points outside the LuT give
+        To = 1, as in calc_To().
+        """
+        Ud_grid, Ta_grid, To_grid = self._Ud_grid, self._Ta_grid, self._To_grid
+
+        if not Ta_grid[0] <= Ta <= Ta_grid[-1]:
+            return np.ones(np.shape(Ud), dtype=np.float64)
+
+        # LuT column at Ta, interpolated between its two neighbours
+        i = min(int(np.searchsorted(Ta_grid, Ta, side='right')) - 1,
+                len(Ta_grid) - 2)
+        w = (Ta - Ta_grid[i]) / (Ta_grid[i + 1] - Ta_grid[i])
+        To_col = To_grid[:, i] * (1.0 - w) + To_grid[:, i + 1] * w
+
+        if self._Ud_step is None:
+            To = np.interp(Ud, Ud_grid, To_col, left=1.0, right=1.0)
+        else:
+            # Position of every Ud in units of grid steps, its interval k
+            # and the fraction within it
+            n = Ud_grid.size
+            t = (Ud - np.float32(Ud_grid[0])) * np.float32(1.0 / self._Ud_step)
+            k = t.astype(np.int32)
+            np.clip(k, 0, n - 2, out=k)
+            frac = t - k
+            lo = To_col[k]
+            To = lo + (To_col[k + 1] - lo) * frac
+            To[(t < 0) | (t > n - 1)] = 1
+
+        To[np.isnan(To)] = 1
+
+        return To
+
     def _calc_To(self,
                  qpoints : tuple | np.ndarray) -> tuple | np.ndarray:
         """
@@ -451,12 +698,11 @@ class LuT:
             Ud = qpoints[0]
             Ta = qpoints[1]
             
-            try:
-                To = self.LuTGridInterpolator((Ud,Ta))
-                
-                
-            except ValueError:
-                
+            To = self.LuTGridInterpolator((Ud,Ta))
+
+            # Out of bounds: the interpolator returns NaN
+            if np.isnan(To):
+
                 if not self.LuT.index.values.min() <= Ud <= self.LuT.index.values.max():
                     warn('Queried Ud value is out of bounds. To=-1 returned.\n')
                     To = -1
@@ -478,17 +724,11 @@ class LuT:
                                  '[(Ud_0,Tamb0_0),..., (Ud_N,Tamb0_N)] with ' +\
                                      'N: number of query points.')
                     
-            try:
-                # Try to evaluate whole array in one go
-                To = self.LuTGridInterpolator(qpoints)
-            
-            except ValueError:
-                # If only one query point is out of bounds, a ValueError is 
-                 # returned. In that case, try to evalute point by point
-                To = []
-                for qpoint in qpoints:
-                    To.append(self._calc_To(tuple(qpoint)))
-            
+            # Evaluate the whole array in one go. Query points outside the
+            # LuT come back as NaN and are marked with To = +1
+            To = self.LuTGridInterpolator(qpoints)
+            To[np.isnan(To)] = 1
+
             return To
         
 

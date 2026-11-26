@@ -25,6 +25,8 @@ from typing import List, Optional
 import numpy as np
 
 from hspy.LuT import LuT
+from hspy.tparray import TPArray
+from hspy.drivers._frame import new_frame
 # ---------------------------------------------------------------------------
 # Attempt to import smbus2; fall back to a stub so the module can be imported
 # on non-Linux hosts for testing / offline use.
@@ -82,6 +84,7 @@ _BIT_EOC = (1 << 0)  # End-of-conversion bitwise mask
 _EEP_PIXCMIN            = 0x0000   # float32  minimum sensitivity coefficient
 _EEP_PIXCMAX            = 0x0004   # float32  maximum sensitivity coefficient
 _EEP_GRADSCALE          = 0x0008   # uint8    thermal gradient scaling exponent
+_EEP_TABLENUMBER        = 0x000B   # uint16 LE look-up table number (TN)
 _EEP_EPSILON            = 0x000D   # uint8    emissivity (100 = 1.00)
 _EEP_MBITREFCAL_CALIB   = 0x001A   # uint8    MBIT used during factory calibration
 _EEP_BIAS_CALIB         = 0x001B   # uint8s
@@ -130,6 +133,12 @@ _F_CLK_MIN       = 1      # MHz, min. clock frequency
 _F_CLK_MAX       = 13     # MHz, max. clock frequency
 _N_PTAT           = 8      # Number of PTATs
 
+# ── Array type ────────────────────────────────────────────────────────────────
+# This driver only talks to the HTPA32x32dR2, so its array type is fixed.
+# The number is the one hspy.tparray.ArrayTypes gives for it, which is what
+# the frame dict and every consumer built on TPArray expect.
+_ARRAY_TYPE = 10           # 'HTPA32x32dR2' in hspy.tparray.ArrayTypes
+
 
 class I2C_Driver:
     pass
@@ -165,6 +174,11 @@ class I2C_HTPA32x32d(I2C_Driver):
         i2c_addr: int = _ADDR_SENSOR,
         eeprom_addr: int = _ADDR_EEPROM,
         timeout_ms: int = 500,
+        active_vdd: bool = True,
+        blind_vdd: bool = False,
+        applyCalib: bool = True,
+        keep_raw: bool = False,
+        DevID: int = -1,
     ):
         """
         Parameters
@@ -173,15 +187,58 @@ class I2C_HTPA32x32d(I2C_Driver):
         i2c_addr    : 7-bit sensor address (default 0x1A)
         eeprom_addr : 7-bit EEPROM address (default 0x50)
         timeout_ms  : Maximum wait time for end-of-conversion
+
+        The rest are the acquisition options acquire_frame() works by. They
+        live here, rather than being arguments of acquire_frame(), so that the
+        call in an acquisition loop is argument-free and identical for every
+        driver in hspy.drivers. They stay writable as plain attributes, so a
+        caller can still flip one between frames.
+
+        active_vdd  : sample VDD while the BLIND bit is not set
+        blind_vdd   : sample VDD while the BLIND bit is set. Must differ from
+                      active_vdd (see convert_i2c_data).
+        applyCalib  : apply the EEPROM calibration, i.e. produce
+                      frame['pix_comp']
+        keep_raw    : if True, every frame carries the raw I2C bytes and the
+                      intermediate compensation terms under frame['raw'].
+                      Off by default: they roughly double the size of a
+                      pickled frame, which matters for the fixed-size slots
+                      of a SharedMemoryQueue.
+        DevID       : optional device number, copied into every frame as
+                      frame['DevID'] so that a consumer fed by several
+                      devices can tell them apart. -1 (default) means "not
+                      set".
+
+        Whether the LuT is applied, i.e. frame['pix_dK'] is produced, is not
+        an argument: init() calls load_lut(), which sets the attribute calcdK
+        depending on whether hspy/luts holds the table matching the table
+        number in the EEPROM.
         """
-        
+
         # Call constructor of parent class
         super(I2C_HTPA32x32d,self).__init__()
-        
+
         self._bus_num    = bus
         self._addr       = i2c_addr
         self._eep_addr   = eeprom_addr
         self._bus: Optional[SMBus] = None
+
+        # Acquisition options (see the docstring above)
+        self.active_vdd = active_vdd
+        self.blind_vdd  = blind_vdd
+        self.applyCalib = applyCalib
+        self.calcdK     = False         # set by load_lut() / the LuT property
+        self.keep_raw   = keep_raw
+        self.DevID      = DevID
+
+        # This driver only ever talks to one kind of sensor, so the array type
+        # and the TPArray describing its data layout are fixed
+        self.ArrayType = _ARRAY_TYPE
+        self.tparray = TPArray(ArrayType=_ARRAY_TYPE)
+
+        # Set by the LuT property; apply_LuT() raises a readable error while
+        # this is None rather than failing with an AttributeError
+        self._LuT: Optional[LuT] = None
 
         # Calibration constants (populated by load_calibration / init)
         self._calib: dict = {}
@@ -217,6 +274,7 @@ class I2C_HTPA32x32d(I2C_Driver):
             raise TypeError(f'LuT object is not type {type(LuT)} but {type(lut)}.')
         else:
             self._LuT = lut
+            self.calcdK = self.applyCalib
     
     # ── Bus open / close ─────────────────────────────────────────────────────
     def open(self) -> None:
@@ -261,8 +319,9 @@ class I2C_HTPA32x32d(I2C_Driver):
                              values stored during factory calibration.
                              If False use the user-defined EEPROM copies.
         """
-        # Step 1 – calibration data
+        # Step 1 – calibration data and the LuT matching its table number
         self.load_calibration()
+        self.load_lut()
 
         # Step 2 – wake up sensor (Section 11.5)
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP)
@@ -303,7 +362,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         
         self._calib["F_CLK"] = F_CLK
         self._calib["t_fr4"] = t_fr4
-        self._timeout_ms = t_fr4 * 1e3 * 1.1            # Timeout for EOC is conversion time plus 10% 
+        self._timeout_ms = t_fr4 *  1.1            # Timeout for EOC is conversion time plus 10% 
 
     def sleep(self) -> None:
         """Put sensor into sleep state (~9 µA standby current)."""
@@ -317,53 +376,69 @@ class I2C_HTPA32x32d(I2C_Driver):
 
     
     # ── Single-call frame acquisition (for use in a thread's loop body) ──────
-    def acquire_frame(self,
-                      active_vdd:bool = True,   # sample vdd when BLIND bit is not set
-                      blind_vdd:bool = False,   # sample vdd when BLIND bit is set
-                      applyCalib:bool = True,   # apply calibration for Ud compensation
-                      calcdK:bool = True) -> dict:      # apply LuT to Ud_comp
+    def acquire_frame(self) -> dict:
         """
         Acquire and fully process one frame: reads the raw pixel data and
         electrical offsets from the sensor over I2C, then converts/rearranges
         the raw bytes and (optionally) applies calibration and the LuT.
 
+        Takes no arguments: what it does is set by the attributes
+        active_vdd, blind_vdd, applyCalib, calcdK and keep_raw, so that this
+        call is identical for every driver in hspy.drivers and an acquisition
+        loop does not have to know which one it is driving.
+
         This bundles what used to be two internally-threaded steps
         (``_read_thread`` + ``_processing_thread``) into a single blocking
         call, so it is intended to be called once per loop iteration by an
-        externally-owned thread class - analogous to how
-        ``HTPA_UDPReader.read_continuous_bytestream()`` is called from
-        within ``UDP_Client``.
-
-        Parameters
-        ----------
-        active_vdd, blind_vdd : see read_frame() / read_electrical_offsets()
-        applyCalib : if True, apply EEPROM calibration (apply_calib)
-        calcdK     : if True, apply the LuT to the calibrated voltages
-                    (apply_LuT). Requires applyCalib=True and self.LuT to be set.
+        externally-owned thread class - the same way ``USB_Client`` and
+        ``UDP_Client`` call their drivers.
 
         Returns
         -------
         dict
-            Raw + converted (+ calibrated / LuT-mapped) frame data. Does
-            NOT contain a 'success' or 'image_id' key - the calling thread
-            is responsible for adding those, the same way UDP_Client does.
+            The frame dictionary documented in ``hspy.drivers._frame``:
+            always 'frame' / 'frame_unit' plus identity, time and auxiliary
+            data, 'pix' with the raw digits, and 'pix_comp' / 'pix_dK' for
+            whichever stages applyCalib / calcdK asked for. Does NOT contain
+            a 'success' or 'image_id' key - the calling thread is responsible
+            for adding those.
         """
-        data = self.read_frame(active_vdd)                        # read pixels, ptat, vdd
-        data.update(self.read_electrical_offsets(blind_vdd))      # read electrical offsets
+        data = self.read_frame(self.active_vdd)                   # read pixels, ptat, vdd
+        data.update(self.read_electrical_offsets(self.blind_vdd)) # read electrical offsets
+
+        # Stamped here, with the device reads done and the processing below
+        # still ahead: this is when the frame was captured, not when its
+        # compensation happened to finish.
+        t = datetime.now()
+        t_mono = time.monotonic()
 
         data = self.convert_i2c_data(data,
-                                     active_vdd,
-                                     blind_vdd)                    # convert and rearrange raw i2c data
+                                     self.active_vdd,
+                                     self.blind_vdd)               # convert and rearrange raw i2c data
 
-        if applyCalib:
+        if self.applyCalib:
             # Calculates Temperatures from pixel voltages given cali-
             # bration data from EEPROM
             data = self.apply_calib(data)
 
-        if calcdK:
+        if self.calcdK:
             data = self.apply_LuT(data)
 
-        return data
+        return new_frame(interface='i2c',
+                         ArrayType=self.ArrayType,
+                         shape=(_ROWS, _COLS),
+                         DevID=self.DevID,
+                         t=t,
+                         t_mono=t_mono,
+                         pix=data['pix'],
+                         pix_comp=data.get('pix_comp'),
+                         pix_dK=data.get('pix_dK'),
+                         eloff=data['eloff'],
+                         ptat=data['ptat'],
+                         vdd=data['vdd'],
+                         ptat_avg=data.get('ptat_avg'),
+                         Tamb=data.get('Tamb'),
+                         raw=data if self.keep_raw else None)
 
     def convert_i2c_data(self,
                          data:dict, 
@@ -701,7 +776,17 @@ class I2C_HTPA32x32d(I2C_Driver):
         None.
 
         """
-        
+
+        if self._LuT is None:
+            raise I2C_HTPA32x32dError(
+                "No LuT set: assign one to driver.LuT, or set "
+                "driver.calcdK = False.")
+
+        if 'pix_comp' not in data:
+            raise I2C_HTPA32x32dError(
+                "apply_LuT() needs the compensated pixel voltages. Construct "
+                "the driver with applyCalib=True, or set driver.calcdK = False.")
+
         # Arrange the comensated pixel voltages and the ambient temperature
         # in a np.ndarray
         Ud_Ta = np.hstack([data['pix_comp'].reshape((-1,1)),
@@ -766,6 +851,7 @@ class I2C_HTPA32x32d(I2C_Driver):
         c["pixcmin"]       = f32(_EEP_PIXCMIN)
         c["pixcmax"]       = f32(_EEP_PIXCMAX)
         c["gradscale"]     = u8 (_EEP_GRADSCALE)
+        c["table_number"]  = u16(_EEP_TABLENUMBER)
         c["epsilon"]       = u8 (_EEP_EPSILON)
 
         # Factory calibration trim settings
@@ -779,8 +865,8 @@ class I2C_HTPA32x32d(I2C_Driver):
 
         # User trim settings
         c["mbitrefcal_user"]    = u8 (_EEP_MBITREFCAL_USER)
-        c["mbit_calib"]         = unpack_mbit(c["mbitrefcal_user"])
-        c["refcal_calib"]       = unpack_refcal(c["mbitrefcal_user"])
+        c["mbit_user"]         = unpack_mbit(c["mbitrefcal_user"])
+        c["refcal_user"]       = unpack_refcal(c["mbitrefcal_user"])
         c["bias_user"]          = u8 (_EEP_BIAS_USER)
         c["clk_user"]           = u8 (_EEP_CLK_USER)
         c["bpa_user"]           = u8 (_EEP_BPA_USER)
@@ -1028,33 +1114,22 @@ class I2C_HTPA32x32d(I2C_Driver):
         return active
 
     
-    def load_lut(
-        self,
-        ta_cols: List[float],
-        dig_rows: List[float],
-        data: List[List[float]],
-    ) -> None:
+    def load_lut(self, lut: Optional[LuT] = None) -> None:
         """
         Load the sensor-specific look-up table for object-temperature
-        calculation (Section 13.2).
+        calculation (Section 13.2) and set calcdK accordingly. Called
+        automatically by init().
 
-        Heimann Sensor provides this table in a separate file called "Table.c".
-        Parse the values from that file and pass them here before calling
-        calculate_temperatures().
-
-        Parameters
-        ----------
-        ta_cols  : Ambient temperature column headers in dK
-                   e.g. [2782, 2882, 2982, 3082, 3182, 3282, 3382]
-        dig_rows : Compensated pixel voltage row headers (digit values)
-                   e.g. [-512, -448, ..., 0, ..., 8192]
-        data     : 2-D list [row_index][col_index] of object temperatures in dK
+        Without an argument, the table matching the table number in the
+        EEPROM (``self._calib['table_number']``) is loaded from hspy/luts. If
+        there is none, no LuT is set and calcdK is False. calcdK is also False
+        while applyCalib is False, since apply_LuT() needs frame['pix_comp'].
         """
-        self._calib["lut"] = {
-            "ta_cols":  ta_cols,
-            "dig_rows": dig_rows,
-            "data":     data,
-        }
+        if lut is None:
+            lut = LuT.from_table_number(self._calib['table_number'])
+
+        self._LuT = lut
+        self.calcdK = lut is not None and self.applyCalib
 
     # ── Trim register helpers ─────────────────────────────────────────────────
 
@@ -1185,66 +1260,6 @@ class I2C_HTPA32x32d(I2C_Driver):
         gg    = c["global_gain"] / 10000.0
         scale = (pmax - pmin) / 65535.0
         return [(c["pij"][n] * scale + pmin) * eps * gg for n in range(_PIXELS)]
-
-    # ── Private: LUT bilinear interpolation (Section 13.2) ───────────────────
-
-    def _lut_interpolate(
-        self, v_pixc: float, ta_dk: float, c: dict
-    ) -> float:
-        """
-        Return object temperature in dK via bilinear interpolation into the
-        look-up table.
-
-        If no LUT has been loaded the ambient temperature is returned as a
-        best-effort fallback.
-        """
-        if "lut" not in c:
-            return ta_dk   # no LUT – fall back to ambient temperature
-
-        lut      = c["lut"]
-        ta_cols  = lut["ta_cols"]
-        dig_rows = lut["dig_rows"]
-        data     = lut["data"]
-
-        # Clamp to table extent
-        ta  = max(ta_cols[0],  min(ta_cols[-1],  ta_dk))
-        dig = max(dig_rows[0], min(dig_rows[-1], v_pixc))
-
-        # Column index (ambient temperature axis)
-        ci = 0
-        for i in range(len(ta_cols) - 1):
-            if ta_cols[i + 1] > ta:
-                ci = i
-                break
-        else:
-            ci = len(ta_cols) - 2
-        
-        # Row index (digit axis)
-        ri = 0
-        for i in range(len(dig_rows) - 1):
-            if dig_rows[i + 1] > dig:
-                ri = i
-                break
-        else:
-            ri = len(dig_rows) - 2
-
-        # Fractional positions
-        dta  = ta_cols[ci + 1]  - ta_cols[ci]
-        ddig = dig_rows[ri + 1] - dig_rows[ri]
-        ta_f  = (ta  - ta_cols[ci])  / dta  if dta  != 0 else 0.0
-        dig_f = (dig - dig_rows[ri]) / ddig if ddig != 0 else 0.0
-
-        # Bilinear interpolation over the four surrounding LUT cells
-        q11 = data[ri][ci]
-        q12 = data[ri][ci + 1]
-        q21 = data[ri + 1][ci]
-        q22 = data[ri + 1][ci + 1]
-
-        return (q11 * (1 - ta_f) * (1 - dig_f)
-                + q12 * ta_f       * (1 - dig_f)
-                + q21 * (1 - ta_f) * dig_f
-                + q22 * ta_f       * dig_f)
-
 
     # ── Private: stack buffer helpers ────────────────────────────────────────
 

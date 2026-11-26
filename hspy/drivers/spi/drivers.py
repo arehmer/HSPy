@@ -17,10 +17,50 @@ Chip select (Section 12):
       EE_Enable = HIGH  ->  sensor selected
       EE_Enable = LOW   ->  internal flash selected
 
-  With a plain spidev chip select this maps to SPI_CS_HIGH while talking to
-  the sensor and to the normal (active low) polarity while talking to the
-  flash.  Because EE_Enable has to be toggled, no other device may share
-  these SPI lines.
+  EE_Enable therefore is a chip select for both devices, active HIGH for
+  the sensor and active LOW for the flash, and has to produce one edge pair
+  per transfer. Between transfers it rests HIGH, so that the flash is never
+  selected while the bus is idle (handling notice for the internal flash);
+  a sensor frame is delimited by short LOW pulses (Figures 12 to 14). On current Raspberry Pi kernels SPI_CS_HIGH is no longer
+  supported, so EE_Enable is driven from a GPIO (see ``ee_enable``) and
+  framed around every transfer in _xfer(). Because EE_Enable has to be
+  toggled, no other device may share these SPI lines.
+
+Raspberry Pi setup - required device tree overlay (spi0-0cs):
+  Why:
+    On current Raspberry Pi kernels the SPI0 chip selects CE0 (GPIO8,
+    header pin 24) and CE1 (GPIO7, header pin 26) are plain GPIOs that the
+    SPI driver claims through the device tree property ``cs-gpios`` with a
+    fixed polarity (GPIO_ACTIVE_LOW). The polarity can no longer be changed
+    from user space: ``spidev.cshigh = True`` fails with
+        OSError: Attempted to set mode 0x4 but mode 0x0 returned
+    EE_Enable, however, must be active HIGH for the sensor and active LOW
+    for the flash on the same wire, which a fixed polarity cannot provide.
+    On this board EE_Enable is wired to a CE pin, so the SPI driver has to
+    release that pin before this driver can drive it as a GPIO. As long as
+    the SPI driver owns it, claiming it from Python fails with
+    "GPIO busy" / "Device or resource busy".
+
+  How:
+    1. In /boot/firmware/config.txt (older OS: /boot/config.txt) replace
+           dtparam=spi=on
+       with
+           dtoverlay=spi0-0cs
+       and reboot. This enables SPI0 (SCLK GPIO11, MOSI GPIO10,
+       MISO GPIO9) without claiming any chip select pin and creates
+       /dev/spidev0.0 only. If /dev/spidev0.0 does not appear, restore
+       dtparam=spi=on and keep the overlay line in addition.
+    2. Check that the CE pin is free:
+           gpioinfo | grep -iE "GPIO7|GPIO8"
+       Neither line may show consumer="spi0 CS0" / "spi0 CS1" any more.
+    3. Open the driver with device=0 (the only spidev node left) and pass
+       a callable that sets the CE pin EE_Enable is wired to:
+           from gpiozero import DigitalOutputDevice
+           ee = DigitalOutputDevice(8, initial_value=False)   # CE0 = GPIO8
+           sensor = SPI_HTPA160x120dR1(
+               bus=0, device=0,
+               ee_enable=lambda level: setattr(ee, 'value', level))
+       Use 7 instead of 8 if EE_Enable is wired to CE1.
 
 SPI frame format (Figures 8 and 9):
   Mode 0 (CPOL = 0, CPHA = 0), MSB first, 8-bit command byte.
@@ -31,13 +71,17 @@ SPI frame format (Figures 8 and 9):
   Max. SPI clock 13 MHz (Table 5).
 """
 
+import ctypes
 import struct
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from hspy.LuT import LuT
+from hspy.tparray import TPArray
+from hspy.drivers._frame import new_frame
 
 # ---------------------------------------------------------------------------
 # Attempt to import spidev; fall back to a stub so the module can be imported
@@ -54,6 +98,38 @@ except ImportError:
             raise RuntimeError(
                 "spidev is not installed. Run: pip install spidev"
             )
+
+# fcntl only exists on Unix; the sensor transfers below need it
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+
+# ---------------------------------------------------------------------------
+# Direct spidev ioctl (linux/spi/spidev.h) for the sensor transfers.
+# spidev.xfer2() copies a Python list in and returns a new one, five copies
+# per read in all. SPI_IOC_MESSAGE instead lets the kernel write straight
+# into a numpy buffer allocated once in open(), like the pre-allocated
+# i2c_msg objects of the I2C driver.
+# ---------------------------------------------------------------------------
+class _SpiIocTransfer(ctypes.Structure):
+    _fields_ = [('tx_buf',           ctypes.c_uint64),
+                ('rx_buf',           ctypes.c_uint64),
+                ('len',              ctypes.c_uint32),
+                ('speed_hz',         ctypes.c_uint32),
+                ('delay_usecs',      ctypes.c_uint16),
+                ('bits_per_word',    ctypes.c_uint8),
+                ('cs_change',        ctypes.c_uint8),
+                ('tx_nbits',         ctypes.c_uint8),
+                ('rx_nbits',         ctypes.c_uint8),
+                ('word_delay_usecs', ctypes.c_uint8),
+                ('pad',              ctypes.c_uint8)]
+
+
+# SPI_IOC_MESSAGE(1) = _IOW('k', 0, char[32])
+_SPI_IOC_MESSAGE_1 = (1 << 30) | (ctypes.sizeof(_SpiIocTransfer) << 16) | \
+    (ord('k') << 8)
 
 
 # -- Sensor register / command bytes (Tables 6-15 of datasheet) --------------
@@ -85,6 +161,8 @@ _BIT_EOC = (1 << 0)  # End-of-conversion bitwise mask
 
 # -- Internal flash (SST26VF016B) command bytes -----------------------------
 _FLASH_CMD_READ = 0x03  # Read, 24-bit address, no dummy byte
+_FLASH_CMD_JEDEC_ID = 0x9F  # JEDEC ID: manufacturer, type, device
+_FLASH_JEDEC_ID = (0xBF, 0x26, 0x41)  # Microchip/SST, SST26 series, 016B
 
 # -- Flash memory map (Figure 10 of datasheet) ------------------------------
 # NOTE: Section 15.2 quotes ThGrad "from 0x3B20 to 0x6270", which is neither
@@ -152,12 +230,17 @@ _T_INTER_REG_MS  = 5        # min delay between writing trim registers
 _T_WAKEUP_US     = 80       # wakeup time after WAKEUP command (Table 5)
 _T_STARTUP_US    = 100      # startup time after power-on reset (Table 5)
 _T_BUF_NS        = 200      # min time between STOP / START (Table 5)
-_F_SPI_TYP       = 10000000  # Hz, typical SPI clock (Table 5)
 _F_SPI_MAX       = 13000000  # Hz, max. SPI clock (Table 5)
 _F_CLK_MIN       = 0.5      # MHz, min. internal clock frequency (Table 11)
 _F_CLK_MAX       = 5.5      # MHz, max. internal clock frequency (Table 11)
 _MAX_XFER_BYTES  = 4096     # default spidev buffer size (bufsiz module param)
 _N_PTAT          = 2 * _BLOCKS  # 24 PTAT / VDD samples per frame
+
+# -- Array type -------------------------------------------------------------
+# This driver only talks to the HTPA160x120dR1, so its array type is fixed.
+# The number is the one hspy.tparray.ArrayTypes gives for it, which is what
+# the frame dict and every consumer built on TPArray expect.
+_ARRAY_TYPE = 18         # 'HTPA160x120dR1' in hspy.tparray.ArrayTypes
 
 
 class SPI_Driver:
@@ -178,9 +261,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         from hspy.drivers.spi import SPI_HTPA160x120dR1
 
-        with SPI_HTPA160x120dR1(bus=0, device=0) as sensor:
-            frame = sensor.acquire_frame(applyCalib=True, calcdK=False)
-            print(frame['Tamb'], frame['pix_comp'].reshape((120, 160)))
+        with SPI_HTPA160x120dR1(bus=0, device=0, ee_enable=ee_enable) as sensor:
+            frame = sensor.acquire_frame()
+            print(frame['Tamb'], frame['frame'].reshape(frame['shape']))
     """
 
     # -- Construction / context manager --------------------------------------
@@ -188,36 +271,101 @@ class SPI_HTPA160x120dR1(SPI_Driver):
     def __init__(
         self,
         bus: int = 0,
-        device: int = 0,
-        max_speed_hz: int = _F_SPI_TYP,
+        device: int = 1,
+        max_speed_hz: int = _F_SPI_MAX,
         sensor_cs_high: bool = True,
         ee_enable: Optional[Callable[[bool], None]] = None,
         max_xfer_bytes: int = _MAX_XFER_BYTES,
         timeout_factor: float = 4.0,
+        eloff_every: int = 1,
+        warmup: bool = True,
+        early_start: bool = False,
+        applyCalib: bool = True,
+        keep_raw: bool = False,
+        DevID: int = -1,
     ):
         """
         Parameters
         ----------
         bus            : SPI bus number (e.g. 0 -> /dev/spidev0.x)
         device         : SPI chip select number (e.g. 0 -> /dev/spidev0.0)
-        max_speed_hz   : SPI clock, 13 MHz max (Table 5)
-        sensor_cs_high : If True the spidev chip select is driven HIGH while
-                         addressing the sensor and LOW while addressing the
-                         internal flash, matching the EE_Enable polarity of
+        max_speed_hz   : SPI clock, 13 MHz max (Table 5). The kernel never
+                         exceeds it; on Raspberry Pi 3/4/5 the even clock
+                         divider turns 13 MHz into 12.5 MHz.
+        sensor_cs_high : If True EE_Enable is pulsed HIGH for every sensor
+                         transfer and LOW for every flash transfer, matching
                          Figures 8 and 9. Set to False if EE_Enable is
                          inverted in hardware.
-        ee_enable      : Optional callable ``ee_enable(sensor: bool)`` that
-                         drives the EE_Enable pin directly (e.g. via GPIO).
-                         If given, the spidev chip select polarity is left
-                         untouched and this callable is used instead.
+        ee_enable      : Required. Callable ``ee_enable(level: bool)`` that
+                         sets the GPIO wired to EE_Enable (True = HIGH).
+                         The SPI controller's own chip select cannot drive
+                         EE_Enable on current Raspberry Pi kernels.
         max_xfer_bytes : Largest single SPI transfer; must not exceed the
                          spidev buffer size (``bufsiz``, 4096 by default).
         timeout_factor : End-of-conversion timeout as a multiple of the
                          estimated block conversion time.
+
+        The rest are the acquisition options acquire_frame() works by. They
+        live here, rather than being arguments of acquire_frame(), so that the
+        call in an acquisition loop is argument-free and identical for every
+        driver in hspy.drivers. They stay writable as plain attributes, so a
+        caller can still flip one between frames.
+
+        eloff_every    : How often a BLIND conversion samples fresh electrical
+                         offsets: 1 (default) means every frame, 8 means every
+                         8th frame, with the previous offsets reused in
+                         between. Section 15.3 recommends sampling them every
+                         8th to 10th frame only, which this driver now keeps
+                         track of itself -- the caller used to have to toggle
+                         the old read_eloff argument frame by frame.
+        warmup         : if True (default), every frame starts with a dummy
+                         conversion of block 0 whose data is discarded.
+                         Block 0 settles much worse after a conversion of
+                         block 11 or a BLIND conversion than after one of its
+                         own block, which makes the top and bottom rows
+                         flicker. Costs one block conversion (~10 ms) per
+                         frame.
+        early_start    : if True, acquire_raw() starts the first conversion
+                         of the next frame (the warm-up, or block 0) right
+                         after the last conversion of a frame has been read.
+                         The next read_frame() then only waits for it. The
+                         sensor is left converting between two calls;
+                         close() and sleep() end that. Off by default: it
+                         saves ~3 ms per frame, but a late return of the
+                         caller then delays the second conversion of the
+                         frame, i.e. block 0 after the warm-up, whose
+                         offset depends on that delay. Without it, the
+                         delay falls before the discarded warm-up.
+        applyCalib     : apply the flash calibration, i.e. produce
+                         frame['pix_comp']
+        keep_raw       : if True, every frame carries the raw SPI bytes and
+                         the intermediate compensation terms under
+                         frame['raw']. Off by default: they roughly double the
+                         size of a pickled frame, which matters for the
+                         fixed-size slots of a SharedMemoryQueue.
+        DevID          : optional device number, copied into every frame as
+                         frame['DevID'] so that a consumer fed by several
+                         devices can tell them apart. -1 (default) means
+                         "not set".
+
+        Whether the LuT is applied, i.e. frame['pix_dK'] is produced, is not
+        an argument: init() calls load_lut(), which sets the attribute calcdK
+        depending on whether hspy/luts holds the table matching the table
+        number in the flash.
         """
 
         # Call constructor of parent class
         super(SPI_HTPA160x120dR1, self).__init__()
+
+        if ee_enable is None:
+            raise ValueError(
+                "ee_enable is required: pass a callable that sets the GPIO "
+                "wired to EE_Enable, e.g. ee_enable=lambda level: "
+                "setattr(pin, 'value', level) with a gpiozero "
+                "DigitalOutputDevice. The SPI controller's own chip select "
+                "cannot drive EE_Enable on current Raspberry Pi kernels "
+                "(see the module docstring)."
+            )
 
         if max_speed_hz > _F_SPI_MAX:
             raise ValueError(
@@ -234,8 +382,42 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         self._timeout_fac   = timeout_factor
         self._spi: Optional[SpiDev] = None
 
-        # None = unknown, True = sensor selected, False = flash selected
-        self._sel_sensor: Optional[bool] = None
+        # Pre-allocated buffers and ioctl descriptors of the sensor
+        # transfers, set up by open()
+        self._io: Optional[SimpleNamespace] = None
+
+        if int(eloff_every) < 1:
+            raise ValueError(f'eloff_every must be >= 1, got {eloff_every}.')
+
+        # Acquisition options (see the docstring above)
+        self.eloff_every = int(eloff_every)
+        self.warmup      = warmup
+        self.early_start = early_start
+        self.applyCalib  = applyCalib
+        self.calcdK      = False        # set by load_lut() / the LuT property
+        self.keep_raw    = keep_raw
+        self.DevID       = DevID
+
+        # Counts frames since the last BLIND conversion, so that the driver
+        # itself decides when fresh electrical offsets are due. Starts at
+        # eloff_every so that the very first frame always reads them.
+        self._n_since_eloff = self.eloff_every
+
+        # time.perf_counter() of the START of block 0 that early_start sent
+        # at the end of the previous frame; None = nothing started
+        self._t_next: Optional[float] = None
+
+        # This driver only ever talks to one kind of sensor, so the array type
+        # and the TPArray describing its data layout are fixed
+        self.ArrayType = _ARRAY_TYPE
+        self.tparray = TPArray(ArrayType=_ARRAY_TYPE)
+
+        # Last level written to EE_Enable; None = unknown
+        self._ee_level: Optional[bool] = None
+
+        # True once the last transfer ended with a rising EE_Enable edge,
+        # which already is the START of the next sensor transfer (Figure 12)
+        self._start_armed = False
 
         # Look-up-table, set via the LuT property
         self._LuT: Optional[LuT] = None
@@ -246,10 +428,14 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # Estimated end-of-conversion timeout in ms, set by init()
         self._timeout_ms: float = 100.0
 
-        # Last converted electrical offsets; reused when acquire_frame() is
-        # called with read_eloff=False (Section 15.3 recommends sampling the
-        # electrical offsets only every 8th to 10th frame).
+        # Last converted electrical offsets; reused on the frames in between
+        # two BLIND conversions (see eloff_every).
         self._eloff_last: Optional[np.ndarray] = None
+
+        # Raw bytes of the last BLIND conversion. acquire_raw() attaches them
+        # to every raw frame, so that process_raw() needs no state of its own
+        # and can run in another process.
+        self._eloff_raw_last: Optional[np.ndarray] = None
 
         # Rolling stack buffers (depth 8) for stable averaging
         self._ptat_stack: List[float] = []
@@ -269,6 +455,23 @@ class SPI_HTPA160x120dR1(SPI_Driver):
     def __exit__(self, *_) -> None:
         self.close()
 
+    def __getstate__(self) -> dict:
+        """
+        Pickle the driver without its hardware: the spidev handle, the
+        EE_Enable callable and the ioctl buffers stay behind. What arrives
+        on the other side can run process_raw() (calibration, LuT, ...) but
+        no transfer - this is how SPI_ProcessingProcess gets the
+        calibration of the device that SPI_AcquisitionProcess opened.
+        """
+        state = self.__dict__.copy()
+        state['_spi'] = None
+        state['_io'] = None
+        state['_ee_enable'] = None
+        state['_ee_level'] = None
+        state['_start_armed'] = False
+        state['_t_next'] = None
+        return state
+
     # --- class properties ---------------------------------------------------
     @property
     def LuT(self):
@@ -281,6 +484,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
             raise TypeError(f'LuT object is not type {type(LuT)} but {type(lut)}.')
         else:
             self._LuT = lut
+            self.calcdK = self.applyCalib
 
     @property
     def calib(self) -> dict:
@@ -302,8 +506,21 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         self._spi.lsbfirst = False
         self._spi.max_speed_hz = self._speed
 
-        self._sel_sensor = None
-        self._select_sensor()
+        # Keep the controller's own chip select out of the way if the kernel
+        # allows it. If not, a CEx pin that is not wired to anything simply
+        # toggles unconnected, which does no harm.
+        try:
+            self._spi.no_cs = True
+        except OSError:
+            pass
+
+        self._alloc_io()
+
+        # Park EE_Enable at its idle level: sensor selected, flash not
+        # selected (handling notice for the internal flash)
+        self._ee_level = None
+        self._set_ee(self._cs_high)
+        self._start_armed = False
 
         # Wait for the sensor to finish its power-on reset (Table 5)
         time.sleep(_T_STARTUP_US * 1e-6)
@@ -317,7 +534,8 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                 pass
             self._spi.close()
             self._spi = None
-            self._sel_sensor = None
+            self._io = None
+            self._t_next = None
 
     # -- High-level public API -----------------------------------------------
 
@@ -336,8 +554,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                              Section 15: the temperature calculation is only
                              valid with the settings used during calibration.
         """
-        # Step 1 - calibration data
+        # Step 1 - calibration data and the LuT matching its table number
         self.load_calibration()
+        self.load_lut()
 
         # Step 2 - wake up sensor (Table 5)
         self._write_register(_CMD_CONFIG, _BIT_WAKEUP)
@@ -386,6 +605,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
     def sleep(self) -> None:
         """Put sensor into sleep state (~11 uA standby current)."""
         self._write_register(_CMD_CONFIG, 0x00)
+        self._t_next = None         # an early-started conversion is aborted
 
     def wakeup(self) -> None:
         """Wake sensor from sleep state."""
@@ -393,57 +613,113 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         time.sleep(_T_WAKEUP_US * 1e-6)
 
     # -- Single-call frame acquisition (for use in a thread's loop body) ------
-    def acquire_frame(self,
-                      read_eloff: bool = True,   # sample the electrical offsets
-                      applyCalib: bool = True,   # apply calibration for Ud compensation
-                      calcdK: bool = True) -> dict:      # apply LuT to Ud_comp
+    def acquire_frame(self) -> dict:
         """
         Acquire and fully process one frame: reads the raw pixel data and
         electrical offsets from the sensor over SPI, then converts/rearranges
         the raw bytes and (optionally) applies calibration and the LuT.
 
+        Takes no arguments: what it does is set by the attributes
+        eloff_every, applyCalib, calcdK and keep_raw, so that this call is
+        identical for every driver in hspy.drivers and an acquisition loop
+        does not have to know which one it is driving.
+
         This bundles the whole acquisition into a single blocking call, so it
         is intended to be called once per loop iteration by an externally
-        owned thread class - analogous to how the I2C driver's
-        ``acquire_frame()`` is used.
-
-        Parameters
-        ----------
-        read_eloff : if True, trigger a BLIND conversion and read fresh
-                     electrical offsets. If False, the offsets of the previous
-                     call are reused. Section 15.3 recommends sampling them
-                     every 8th to 10th frame only.
-        applyCalib : if True, apply flash calibration (apply_calib)
-        calcdK     : if True, apply the LuT to the calibrated voltages
-                     (apply_LuT). Requires applyCalib=True and self.LuT to be set.
+        owned thread class - the same way the I2C, UDP and USB drivers are
+        used.
 
         Returns
         -------
         dict
-            Raw + converted (+ calibrated / LuT-mapped) frame data. Does
-            NOT contain a 'success' or 'image_id' key - the calling thread
-            is responsible for adding those.
+            The frame dictionary documented in ``hspy.drivers._frame``:
+            always 'frame' / 'frame_unit' plus identity, time and auxiliary
+            data, 'pix' with the raw digits, and 'pix_comp' / 'pix_dK' for
+            whichever stages applyCalib / calcdK asked for. Does NOT contain
+            a 'success' or 'image_id' key - the calling thread is responsible
+            for adding those.
         """
-        data = self.read_frame()                    # read pixels, atc, ptat, vdd
+        return self.process_raw(self.acquire_raw())
 
-        if read_eloff:
-            data.update(self.read_electrical_offsets())   # read electrical offsets
+    def acquire_raw(self) -> dict:
+        """
+        The device half of acquire_frame(): run the conversions and read the
+        raw bytes, nothing else. Small (about 42 kB) and picklable, so that
+        SPI_AcquisitionProcess can hand it to SPI_ProcessingProcess and
+        start the next frame while this one is being processed.
+
+        Returns
+        -------
+        dict with keys 'pix_raw' and 't' (see read_frame()), 'eloff_raw'
+        (see read_electrical_offsets(); the last BLIND conversion on the
+        frames in between, see eloff_every) and 't_mono'.
+        """
+        # Fresh electrical offsets every eloff_every-th frame; the ones in
+        # between reuse the last BLIND conversion (Section 15.3)
+        blind = self._n_since_eloff >= self.eloff_every
+
+        # With early_start, the last conversion of this frame (block 11 or
+        # BLIND) starts the first one of the next frame
+        data = self.read_frame(start_next=self.early_start and not blind)
+
+        if blind:
+            data.update(self.read_electrical_offsets(start_next=self.early_start))
+            self._eloff_raw_last = data['eloff_raw']
+            self._n_since_eloff = 1
+        else:
+            data['eloff_raw'] = self._eloff_raw_last
+            self._n_since_eloff += 1
+
+        # Stamped here, with the device reads done and the processing
+        # still ahead: this is when the frame was captured, not when its
+        # compensation happened to finish.
+        data['t'] = datetime.now()
+        data['t_mono'] = time.monotonic()
+
+        return data
+
+    def process_raw(self, data: dict) -> dict:
+        """
+        The compute half of acquire_frame(): convert the raw bytes from
+        acquire_raw() and, depending on applyCalib / calcdK, apply the
+        calibration and the LuT. Talks to no hardware, so it also runs on
+        an unpickled copy of the driver in another process.
+
+        Returns the frame dictionary, see acquire_frame().
+        """
+        t = data['t']
+        t_mono = data['t_mono']
 
         data = self.convert_spi_data(data)          # convert and rearrange raw spi data
 
-        if applyCalib:
+        if self.applyCalib:
             # Calculates compensated pixel voltages from raw pixel data given
             # the calibration data from the internal flash
             data = self.apply_calib(data)
 
-        if calcdK:
+        if self.calcdK:
             data = self.apply_LuT(data)
 
-        return data
+        return new_frame(interface='spi',
+                         ArrayType=self.ArrayType,
+                         shape=(_ROWS, _COLS),
+                         DevID=self.DevID,
+                         t=t,
+                         t_mono=t_mono,
+                         pix=data['pix'],
+                         pix_comp=data.get('pix_comp'),
+                         pix_dK=data.get('pix_dK'),
+                         eloff=data['eloff'],
+                         ptat=data['ptat'],
+                         vdd=data['vdd'],
+                         atc=data['atc'],
+                         ptat_avg=data.get('ptat_avg'),
+                         Tamb=data.get('Tamb'),
+                         raw=data if self.keep_raw else None)
 
     def convert_spi_data(self, data: dict) -> dict:
         """
-        Convert and rearrange the raw byte strings returned by read_frame()
+        Convert and rearrange the raw byte arrays returned by read_frame()
         and read_electrical_offsets() into flat, image-ordered numpy arrays.
 
         Both halves are transmitted MSB first (big endian). The read-out order
@@ -453,88 +729,60 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         Adds the keys 'pix', 'eloff', 'ptat', 'vdd' and 'atc' to *data*.
         """
 
-        pix_array = np.zeros((_ROWS, _COLS), dtype=np.uint16)   # rearranged pixel data
-
-        atc:  Dict[str, list] = {'top': [], 'bot': []}
-        ptat: Dict[str, list] = {'top': [], 'bot': []}
-        vdd:  Dict[str, list] = {'top': [], 'bot': []}
-
         # ------------- Convert pixels and atc/ptat/vdd ------------------------
+        # Drop the byte clocked in during the command and view the rest as
+        # big-endian words: (block, half, 803), no copy
+        words = data['pix_raw'][..., 1:].view('>u2')
 
-        for block in range(len(data['pix_raw'])):
-            top_raw = data['pix_raw'][block]['top']
-            bot_raw = data['pix_raw'][block]['bot']
+        # Word[0] = ATC, Word[1] = PTAT, Word[2] = VDD (Tables 12 and 13);
+        # ordered top blocks 0..11, then bottom blocks 0..11
+        header = words[..., :_HEADER_WORDS].transpose(1, 0, 2)   # (half, block, 3)
 
-            top_int = np.frombuffer(top_raw, dtype='>u2')
-            bot_int = np.frombuffer(bot_raw, dtype='>u2')
-            # ---------------------------------
-            data['pix_raw'][block]['top'] = top_int
-            data['pix_raw'][block]['bot'] = bot_int
-            # ---------------------------------
-            # Word[0] = ATC, Word[1] = PTAT, Word[2] = VDD (Tables 12 and 13)
-            atc['top'].append(top_int[0])
-            atc['bot'].append(bot_int[0])
-            ptat['top'].append(top_int[1])
-            ptat['bot'].append(bot_int[1])
-            vdd['top'].append(top_int[2])
-            vdd['bot'].append(bot_int[2])
-
-            pixels_top = top_int[_HEADER_WORDS:]
-            pixels_bot = bot_int[_HEADER_WORDS:]
-
-            # Rearrange top and bottom half according to Section 8: the top
-            # half is read top-down, the bottom half bottom-up.
-            pixels_top = pixels_top.reshape((_ROWS_BLOCK, _COLS))
-            pixels_bot = np.flipud(pixels_bot.reshape((_ROWS_BLOCK, _COLS)))
-
-            # Parse top and bottom half pixels to pix_array
-            pix_array[block * _ROWS_BLOCK:(block + 1) * _ROWS_BLOCK, :] = pixels_top
-            pix_array[_ROWS - (block + 1) * _ROWS_BLOCK:
-                      _ROWS - block * _ROWS_BLOCK, :] = pixels_bot
+        # Rearrange top and bottom half according to Section 8: the top half
+        # is read top-down, the bottom half bottom-up. Stacking the blocks in
+        # read-out order gives 60 rows per half; the bottom ones are mirrored.
+        # Assigning into a native uint16 array is the only copy.
+        pixels = words[..., _HEADER_WORDS:]                     # (block, half, 800)
+        half_rows = (_BLOCKS * _ROWS_BLOCK, _COLS)              # (60, 160)
+        pix_array = np.empty((_ROWS, _COLS), dtype=np.uint16)
+        pix_array[:_ROWS // 2] = pixels[:, 0].reshape(half_rows)
+        pix_array[_ROWS // 2:] = pixels[:, 1].reshape(half_rows)[::-1]
 
         # ----------- Convert electrical offsets ------------------------------
         if 'eloff_raw' in data:
-            top_raw = data['eloff_raw']['top']
-            bot_raw = data['eloff_raw']['bot']
+            eloff_words = data['eloff_raw'][:, 1:].view('>u2')    # (half, 803)
 
-            top_int = np.frombuffer(top_raw, dtype='>u2')   # 803 words
-            bot_int = np.frombuffer(bot_raw, dtype='>u2')   # 803 words
-            # ---------------------------------
-            data['eloff_raw']['top'] = top_int
-            data['eloff_raw']['bot'] = bot_int
-            # ---------------------------------
             # The BLIND read returns its own ATC / PTAT / VDD header. It is
             # kept separate because Section 15.1 averages the 24 PTAT samples
             # of the active conversion only.
-            data['atc_blind']  = np.array([top_int[0], bot_int[0]], dtype=np.uint16)
-            data['ptat_blind'] = np.array([top_int[1], bot_int[1]], dtype=np.uint16)
-            data['vdd_blind']  = np.array([top_int[2], bot_int[2]], dtype=np.uint16)
+            data['atc_blind']  = eloff_words[:, 0].astype(np.uint16)
+            data['ptat_blind'] = eloff_words[:, 1].astype(np.uint16)
+            data['vdd_blind']  = eloff_words[:, 2].astype(np.uint16)
 
-            eloff_top = top_int[_HEADER_WORDS:]
-            eloff_bot = bot_int[_HEADER_WORDS:]
-
-            topbot = list(np.hstack([eloff_top, eloff_bot]))
+            # 800 top offsets followed by 800 bottom offsets
+            topbot = eloff_words[:, _HEADER_WORDS:].astype(np.uint16).ravel()
 
             self._eloff_last = self._sort_perBlock_calibData(topbot)
 
         if self._eloff_last is None:
             raise SPI_HTPA160x120dR1Error(
-                "No electrical offsets available. Call read_electrical_offsets() "
-                "or acquire_frame(read_eloff=True) at least once."
+                "No electrical offsets available. Call "
+                "read_electrical_offsets() at least once, or let "
+                "acquire_frame() do it (it reads them on its first call)."
             )
 
         # ------------- Append converted data to dict and return --------------
-        data['pix']   = pix_array.flatten()
-        data['eloff'] = self._eloff_last.flatten()
-        data['ptat']  = np.array(ptat['top'] + ptat['bot'], dtype=np.uint16)
-        data['vdd']   = np.array(vdd['top'] + vdd['bot'], dtype=np.uint16)
-        data['atc']   = np.array(atc['top'] + atc['bot'], dtype=np.uint16)
+        data['pix']   = pix_array.ravel()
+        data['eloff'] = self._eloff_last
+        data['ptat']  = header[..., 1].astype(np.uint16).ravel()
+        data['vdd']   = header[..., 2].astype(np.uint16).ravel()
+        data['atc']   = header[..., 0].astype(np.uint16).ravel()
 
         return data
 
     # -- Single Frame readout ------------------------------------------------
 
-    def read_frame(self) -> dict:
+    def read_frame(self, start_next: bool = False) -> dict:
         """
         Acquire one complete frame (12 blocks, top and bottom half).
 
@@ -546,49 +794,87 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         half in front of the pixel data (Tables 12 and 13), so no separate
         VDD measurement is required.
 
+        With warmup, a dummy conversion of block 0 comes first. If the
+        previous frame already started that first conversion (early_start),
+        it is only waited for.
+
+        Parameters
+        ----------
+        start_next : if True, START the first conversion of the next frame
+                     right after the last block has been read (see
+                     early_start; acquire_raw() decides).
+
         Returns
         -------
         dict with keys:
-          "pix_raw" - {block: {"top": bytes(1606), "bot": bytes(1606)}}
+          "pix_raw" - uint8 array (12, 2, 1607): block, half (0 = top,
+                      1 = bottom), byte 0 clocked in during the command
+                      followed by the 1606 data bytes
           "t"       - datetime.now() at function return
         """
-        t_block = self._calib["t_block"]        # ms, block conversion time
+        io = self._io
+
+        # Write to configuration register:
+        # ---------------------------------------------------
+        # | 7 | 6 | 5 | 4 |   3   |  2  |   1   |   0    |
+        # |     BLOCK     | START | RFU | BLIND | WAKEUP |
+        # ---------------------------------------------------
+        # (config, buffer) of every conversion in order. The warm-up reads
+        # into the buffer of block 0, which block 0 then overwrites.
+        conversions = [(_BIT_WAKEUP | _BIT_START | (block << _SHIFT_BLOCK),
+                        io.xf_frame[block]) for block in range(_BLOCKS)]
+        if self.warmup:
+            conversions.insert(0, conversions[0])
+
+        # The first conversion (block 0, warm-up or not) may already run
+        t_start, self._t_next = self._t_next, None
 
         # --- Read in raw bytes of top and lower half from all 12 blocks ---
-        raw_bytes: dict = {}
+        for config, xfers in conversions:
+            self._convert(config, xfers, t_start)
+            t_start = None
 
-        for block in range(_BLOCKS):
-
-            raw_bytes[block] = {}
-
-            # Write to configuration register:
-            # ---------------------------------------------------
-            # | 7 | 6 | 5 | 4 |   3   |  2  |   1   |   0    |
-            # |     BLOCK     | START | RFU | BLIND | WAKEUP |
-            # ---------------------------------------------------
-            config = _BIT_WAKEUP | _BIT_START | (block << _SHIFT_BLOCK)
-
-            # Write to config register
-            self._write_register(_CMD_CONFIG, config)
-
-            # Pause 90 % of the approximate conversion time before checking
-            # if end of conversion is reached
-            time.sleep(0.9 * t_block * 1e-3)
-
-            # Start checking for end of conversion bit
-            self._wait_eoc()
-
-            # Read block from register
-            top_raw, bot_raw = self._read_both_halves()
-
-            raw_bytes[block]['top'] = top_raw
-            raw_bytes[block]['bot'] = bot_raw
+        if start_next:
+            self._start_next_frame()
 
         # ------ Return -------------------------------------------------------
-        return {'pix_raw': raw_bytes, 't': datetime.now()}
+        # The one copy per frame: the buffer is overwritten by the next one
+        return {'pix_raw': io.rx_frame.copy(), 't': datetime.now()}
+
+    def _convert(self, config: int, xfers, t_start: Optional[float] = None) -> None:
+        """
+        One conversion: write *config* (with START) to the config register,
+        wait for the end of conversion and read both halves into *xfers*.
+        If t_start (time.perf_counter()) is given, the conversion was
+        already started then and is only waited for.
+        """
+        if t_start is None:
+            self._write_register(_CMD_CONFIG, config)
+            t_start = time.perf_counter()
+
+        # Pause until 90 % of the approximate conversion time after the
+        # START before checking if end of conversion is reached
+        rest = t_start + 0.9 * self._calib["t_block"] * 1e-3 - time.perf_counter()
+        if rest > 0:
+            time.sleep(rest)
+
+        # Start checking for end of conversion bit
+        self._wait_eoc()
+
+        # Read block straight into its row of the frame buffer
+        self._read_both_halves(xfers)
+
+    def _start_next_frame(self) -> None:
+        """
+        early_start: START the first conversion of the next frame (block 0;
+        the warm-up if enabled, otherwise the real one) and remember when,
+        so that the next read_frame() only waits for it.
+        """
+        self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START)
+        self._t_next = time.perf_counter()
 
     # -- Electrical Offset Readout -------------------------------------------
-    def read_electrical_offsets(self) -> dict:
+    def read_electrical_offsets(self, start_next: bool = False) -> dict:
         """
         Trigger a BLIND conversion and read all 1600 electrical offset values
         (Tables 14 and 15).
@@ -597,26 +883,31 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         the active pixels and the BLOCK setting is ignored, so a single pair
         of reads returns all offsets.
 
+        Parameters
+        ----------
+        start_next : if True, START the first conversion of the next frame
+                     right after the offsets have been read (see
+                     early_start; acquire_raw() decides).
+
         Returns
         -------
-        dict with key "eloff_raw" -> {"top": bytes(1606), "bot": bytes(1606)}
+        dict with key "eloff_raw" -> uint8 array (2, 1607): half (0 = top,
+        1 = bottom), byte 0 clocked in during the command followed by the
+        1606 data bytes
         """
-        t_block = self._calib["t_block"]        # ms, block conversion time
+        # A conversion started early for the next frame has to end before
+        # a new one may start; its data are discarded, read_frame() then
+        # starts its first conversion itself
+        if self._t_next is not None:
+            self._convert(0, self._io.xf_frame[0], self._t_next)
+            self._t_next = None
 
-        # Write to config register
-        self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START | _BIT_BLIND)
+        self._convert(_BIT_WAKEUP | _BIT_START | _BIT_BLIND, self._io.xf_eloff)
 
-        # Pause 90 % of the approximate conversion time before checking
-        # if end of conversion is reached
-        time.sleep(0.9 * t_block * 1e-3)
+        if start_next:
+            self._start_next_frame()
 
-        # Start checking for end of conversion bit
-        self._wait_eoc()
-
-        # Read offsets from register
-        top_raw, bot_raw = self._read_both_halves()
-
-        return {'eloff_raw': {'top': top_raw, 'bot': bot_raw}}
+        return {'eloff_raw': self._io.rx_eloff.copy()}
 
     # -- Temperature calculation ---------------------------------------------
     def calculate_Tamb(self, data: dict) -> dict:
@@ -666,66 +957,52 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         c = self._calib             # Calibration data dictionary
 
+        # All frame-independent factors are precomputed as float32 arrays by
+        # _precompute_calib(); per frame only scalars and a few float32
+        # multiply-adds remain.
+
         # ------------- 15.1 Ambient Temperature ------------------------------
         data = self.calculate_Tamb(data)
 
         PTAT_avg = data['ptat_avg']
 
-        # ------------- 15.2 Thermal Offset -----------------------------------
-        Th_grad   = c["thgrad_arr"]
-        Th_off    = c["thoffset_arr"]
-        gradScale = c["gradscale"]
-
-        V_ThComp = (Th_grad * PTAT_avg) / 2 ** (gradScale) + Th_off
-
-        data['V_ThComp'] = V_ThComp         # store for debugging
-
-        V_comp = data['pix'].astype(np.float64) - V_ThComp   # apply compensation
-
-        # ------------- 15.3 Electrical Offset --------------------------------
-        V_ElComp = data['eloff'].astype(np.float64)
-
-        data['V_ElComp'] = V_ElComp         # store for debugging
-
-        V_comp = V_comp - V_ElComp          # apply compensation
-
-        # ------------- 15.4 Vdd Compensation ---------------------------------
-        VddCompGrad = c["vddcompgrad_arr"]
-        VddCompOff  = c["vddcompoff_arr"]
-        VddScGrad   = c["vddscgrad"]
-        VddScOff    = c["vddscoff"]
-
-        VddTh1      = c["vddth1"]
-        VddTh2      = c["vddth2"]
-        PTAT_Th1    = c["ptat_th1"]
-        PTAT_Th2    = c["ptat_th2"]
-
-        VDD_avg = data['vdd'].astype(np.float64).mean()
+        # ------------- 15.4 Vdd factor (scalar) ------------------------------
+        VDD_avg = data['vdd'].mean()        # uint16 in, float64 accumulator
 
         data['vdd_avg'] = VDD_avg
 
-        V_VddComp = ((VddCompGrad * PTAT_avg) / (2 ** VddScGrad) + VddCompOff) / \
-            (2 ** VddScOff) * \
-            (VDD_avg - VddTh1 - ((VddTh2 - VddTh1) / (PTAT_Th2 - PTAT_Th1)) *
-             (PTAT_avg - PTAT_Th1))
+        f_vdd = VDD_avg - c["vddth1"] - c["vdd_slope"] * (PTAT_avg - c["ptat_th1"])
 
-        data['V_VddComp'] = V_VddComp       # store for debugging
+        p   = np.float32(PTAT_avg)
+        f   = np.float32(f_vdd)
+        p_f = np.float32(PTAT_avg * f_vdd)
 
-        V_comp = V_comp - V_VddComp         # apply compensation
+        # ------------- 15.2 Thermal Offset -----------------------------------
+        V_ThComp = c["thgrad_s"] * p
+        V_ThComp += c["thoffset_f"]
+
+        # ------------- 15.4 Vdd Compensation ---------------------------------
+        V_VddComp = c["vddgrad_s"] * p_f
+        V_VddComp += c["vddoff_s"] * f
+
+        # ------------- 15.3 Electrical Offset --------------------------------
+        # pix and eloff stay uint16 until here; the subtraction casts both
+        # straight to float32, without a float64 copy and without the
+        # wrap-around a uint16 difference would have
+        V_comp = np.subtract(data['pix'], data['eloff'], dtype=np.float32)
+
+        V_comp -= V_ThComp
+        V_comp -= V_VddComp
+
+        # Stored for debugging (only kept with keep_raw); references, no copies
+        data['V_ThComp']  = V_ThComp
+        data['V_ElComp']  = data['eloff']
+        data['V_VddComp'] = V_VddComp
+        data['scale']     = c["scale"]
 
         # ------------- 15.5 Object Temperature -------------------------------
-        Pij         = c["pij_arr"]
-        PixC_max    = c["pixcmax"]
-        PixC_min    = c["pixcmin"]
-        eps         = c["epsilon"]
-        GlobalGain  = c["global_gain"]
-
-        PixCij = (Pij * (PixC_max - PixC_min) / 65535 + PixC_min) * \
-            eps / 100 * GlobalGain / 10000
-
-        data['scale'] = _PCSCALEVAL / PixCij   # store for debugging
-
-        pix_comp = V_comp * _PCSCALEVAL / PixCij
+        V_comp *= c["scale"]
+        pix_comp = V_comp
 
         # ------------- 16.1 Pixel Masking ------------------------------------
         pix_comp = self.mask_dead_pixels(pix_comp)
@@ -752,15 +1029,22 @@ class SPI_HTPA160x120dR1(SPI_Driver):
             The same dictionary with the key 'pix_dK' added.
         """
 
-        # Arrange the compensated pixel voltages and the ambient temperature
-        # in a np.ndarray
-        Ud_Ta = np.hstack([data['pix_comp'].reshape((-1, 1)),
-                           np.tile(data['Tamb'], (_PIXELS, 1)).reshape((-1, 1))])
+        if self._LuT is None:
+            raise SPI_HTPA160x120dR1Error(
+                "No LuT set: assign one to driver.LuT, or set "
+                "driver.calcdK = False.")
 
-        pix_dK = self.LuT.calc_To(Ud_Ta)
+        if 'pix_comp' not in data:
+            raise SPI_HTPA160x120dR1Error(
+                "apply_LuT() needs the compensated pixel voltages. Construct "
+                "the driver with applyCalib=True, or set driver.calcdK = False.")
+
+        # Tamb is the same for every pixel of the frame, so the bilinear LuT
+        # interpolation reduces to one LuT column and np.interp along Ud
+        pix_dK = self.LuT.calc_To_const_Ta(data['pix_comp'], data['Tamb'])
 
         # Section 16.1 masks the temperature values of the defect pixels
-        pix_dK = self.mask_dead_pixels(np.asarray(pix_dK).flatten())
+        pix_dK = self.mask_dead_pixels(pix_dK)
 
         data['pix_dK'] = pix_dK
 
@@ -804,6 +1088,10 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         Read all calibration constants from the internal flash (Figure 10)
         and cache them in self._calib. Called automatically by init().
         """
+        # Make sure the flash, not the sensor, answers before trusting
+        # anything read from it
+        self.check_flash()
+
         c: dict = {}
 
         def u8(addr: int) -> int:
@@ -907,9 +1195,62 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         c["vddcompgrad_arr"] = self._sort_perBlock_calibData(c["vddcompgrad"])
         c["vddcompoff_arr"]  = self._sort_perBlock_calibData(c["vddcompoff"])
 
+        self._precompute_calib(c)
+
         self._calib = c
 
-    def _sort_perBlock_calibData(self, block_data: list) -> np.ndarray:
+    @staticmethod
+    def _precompute_calib(c: dict) -> None:
+        """
+        Fold every frame-independent part of apply_calib() into per-pixel
+        float32 arrays once, so that a frame only needs a few multiply-adds
+        (Sections 15.2 - 15.5):
+
+            V_ThComp  = thgrad_s * PTAT_av + thoffset_f
+            V_VddComp = vddgrad_s * PTAT_av * f_vdd + vddoff_s * f_vdd
+            pix_comp  = (pix - eloff - V_ThComp - V_VddComp) * scale
+
+        with the frame scalar f_vdd = VDD_av - VddTh1 - vdd_slope * (PTAT_av - PTAT_Th1).
+        Computed in float64, stored as float32: float32 halves the memory
+        traffic of every per-frame operation, and its 24-bit mantissa still
+        resolves the 16-bit sensor digits.
+        """
+        f32 = np.float32
+
+        c["thgrad_s"]   = (c["thgrad_arr"] / 2 ** c["gradscale"]).astype(f32)
+        c["thoffset_f"] = c["thoffset_arr"].astype(f32)
+
+        c["vddgrad_s"] = (c["vddcompgrad_arr"] / 2 ** c["vddscgrad"]
+                          / 2 ** c["vddscoff"]).astype(f32)
+        c["vddoff_s"]  = (c["vddcompoff_arr"] / 2 ** c["vddscoff"]).astype(f32)
+        c["vdd_slope"] = (c["vddth2"] - c["vddth1"]) / (c["ptat_th2"] - c["ptat_th1"])
+
+        PixCij = (c["pij_arr"] * (c["pixcmax"] - c["pixcmin"]) / 65535
+                  + c["pixcmin"]) * c["epsilon"] / 100 * c["global_gain"] / 10000
+        c["scale"] = (_PCSCALEVAL / PixCij).astype(f32)
+
+    def read_flash_id(self) -> bytes:
+        """Return the 3-byte JEDEC ID of the internal flash."""
+        rx = self._xfer([_FLASH_CMD_JEDEC_ID, 0x00, 0x00, 0x00], sensor=False)
+        return bytes(rx[1:4])
+
+    def check_flash(self) -> None:
+        """
+        Read the JEDEC ID of the internal flash and raise if it is not the
+        SST26VF016B. A wrong ID almost always means EE_Enable does not reach
+        the sensor (wrong GPIO, wrong polarity, pin still claimed by the SPI
+        driver), so the flash is never selected.
+        """
+        jid = self.read_flash_id()
+        if tuple(jid) != _FLASH_JEDEC_ID:
+            raise SPI_HTPA160x120dR1Error(
+                f"Internal flash did not answer: JEDEC ID {jid.hex(' ')}, "
+                f"expected {bytes(_FLASH_JEDEC_ID).hex(' ')} (SST26VF016B). "
+                f"Check that ee_enable drives the pin wired to EE_Enable "
+                f"and that sensor_cs_high matches the wiring."
+            )
+
+    def _sort_perBlock_calibData(self, block_data: list | np.ndarray) -> np.ndarray:
         """
         Expand a block-wise data set (1600 entries: 800 top + 800 bottom) to a
         full, image-ordered array of _PIXELS entries.
@@ -921,8 +1262,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         800 entries the 5 rows of a bottom-half block in bottom-up order.
         """
 
-        if not isinstance(block_data, list):
-            raise TypeError(f'block_data is type {type(block_data)} instead of list.')
+        if not isinstance(block_data, (list, np.ndarray)):
+            raise TypeError(f'block_data is type {type(block_data)} instead '
+                            f'of list or np.ndarray.')
 
         # Check input size
         expected_len = _N_ELOFF
@@ -1122,17 +1464,22 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         return active
 
-    def load_lut(self, lut: LuT) -> None:
+    def load_lut(self, lut: Optional[LuT] = None) -> None:
         """
         Load the sensor-specific look-up table for object-temperature
-        calculation (Section 16.2).
+        calculation (Section 16.2) and set calcdK accordingly. Called
+        automatically by init().
 
-        Heimann Sensor provides this table in a separate file called "Table.c";
-        the matching table is identified by the table number stored in the
-        flash (``self.calib['table_number']``). Parse it into a
-        :class:`hspy.LuT.LuT` and pass it here before calling apply_LuT().
+        Without an argument, the table matching the table number in the flash
+        (``self.calib['table_number']``) is loaded from hspy/luts. If there is
+        none, no LuT is set and calcdK is False. calcdK is also False while
+        applyCalib is False, since apply_LuT() needs frame['pix_comp'].
         """
-        self.LuT = lut
+        if lut is None:
+            lut = LuT.from_table_number(self._calib['table_number'])
+
+        self._LuT = lut
+        self.calcdK = lut is not None and self.applyCalib
 
     # -- Trim register helpers -----------------------------------------------
 
@@ -1194,60 +1541,143 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
     def read_status(self) -> int:
         """Return the raw 8-bit status register value (Table 7)."""
-        return self._read_command(_CMD_STATUS, 1)[0]
+        io = self._io
+        self._xfer(io.xf_status, sensor=True)
+        return int(io.rx_status[1])
 
     # -- Private: low-level SPI ----------------------------------------------
 
-    def _select_sensor(self) -> None:
-        """Drive EE_Enable so that the sensor is addressed (Figures 8 and 9)."""
-        if self._sel_sensor is True:
+    def _set_ee(self, level: bool) -> None:
+        """Set the physical level of the EE_Enable line (True = HIGH)."""
+        if self._ee_level is level:
             return
-        if self._ee_enable is not None:
-            self._ee_enable(True)
-        else:
-            self._spi.cs_high = self._cs_high
-        self._sel_sensor = True
+        self._ee_enable(level)
+        self._ee_level = level
 
-    def _select_flash(self) -> None:
-        """Drive EE_Enable so that the internal flash is addressed."""
-        if self._sel_sensor is False:
-            return
-        if self._ee_enable is not None:
-            self._ee_enable(False)
+    def _alloc_io(self) -> None:
+        """
+        Allocate the buffers and ioctl descriptors of every sensor transfer
+        once, so that acquiring a frame allocates and copies nothing:
+
+          rx_frame   (12, 2, 1607) uint8  one row per block and half; byte 0
+                                          is clocked in during the command
+          rx_eloff   (2, 1607) uint8      the same for the BLIND conversion
+          xf_frame   [block][half]        READ_DATA1/2 into rx_frame
+          xf_eloff   [half]               READ_DATA1/2 into rx_eloff
+          xf_status                       status command, answer in rx_status[1]
+          xf_write                        register write from tx_write
+        """
+        n = _READ_BYTES + 1             # command byte + data
+
+        if n > self._max_xfer:
+            raise SPI_HTPA160x120dR1Error(
+                f"A sensor read of {n} bytes exceeds the SPI buffer size of "
+                f"{self._max_xfer} bytes. Increase the spidev 'bufsiz' "
+                f"module parameter or raise max_xfer_bytes."
+            )
+
+        io = SimpleNamespace()
+        io.fd = self._spi.fileno()
+
+        io.tx_read = np.zeros((2, n), dtype=np.uint8)
+        io.tx_read[0, 0] = _CMD_READ_TOP
+        io.tx_read[1, 0] = _CMD_READ_BOT
+        io.rx_frame = np.zeros((_BLOCKS, 2, n), dtype=np.uint8)
+        io.rx_eloff = np.zeros((2, n), dtype=np.uint8)
+        io.tx_status = np.array([_CMD_STATUS, 0x00], dtype=np.uint8)
+        io.rx_status = np.zeros(2, dtype=np.uint8)
+        io.tx_write = np.zeros(2, dtype=np.uint8)
+
+        def transfer(tx: np.ndarray, rx: Optional[np.ndarray]) -> _SpiIocTransfer:
+            # The descriptors hold raw pointers into the arrays above, which
+            # live as long as io does
+            return _SpiIocTransfer(tx_buf=tx.ctypes.data,
+                                   rx_buf=0 if rx is None else rx.ctypes.data,
+                                   len=tx.size,
+                                   speed_hz=self._speed,
+                                   bits_per_word=8)
+
+        io.xf_frame = [[transfer(io.tx_read[h], io.rx_frame[b, h])
+                        for h in (0, 1)] for b in range(_BLOCKS)]
+        io.xf_eloff = [transfer(io.tx_read[h], io.rx_eloff[h]) for h in (0, 1)]
+        io.xf_status = transfer(io.tx_status, io.rx_status)
+        io.xf_write = transfer(io.tx_write, None)
+
+        self._io = io
+
+    def _spi_transfer(self, tx):
+        """
+        The bare transfer inside _xfer(): a pre-built _SpiIocTransfer goes
+        straight to the kernel, anything else (flash reads) via xfer2().
+        """
+        if isinstance(tx, _SpiIocTransfer):
+            fcntl.ioctl(self._io.fd, _SPI_IOC_MESSAGE_1, tx)
+            return None
+        return self._spi.xfer2(tx)
+
+    def _xfer(self, tx, sensor: bool):
+        """
+        One framed SPI transfer to the sensor or to the internal flash.
+        *tx* is either a list of bytes (returns the received list) or one of
+        the pre-built descriptors of _alloc_io() (returns None, the answer
+        is in its rx buffer).
+
+        EE_Enable rests at the sensor level (HIGH) between transfers, so the
+        flash is never selected while the bus is idle (datasheet, handling
+        notice for the internal flash). Frames (Figures 12 to 14, Tbuf):
+
+            sensor:  [LOW -> HIGH (start)] -> transfer -> LOW (stop) -> HIGH
+            flash :  LOW (CE# active)      -> transfer -> HIGH
+
+        Figure 12: the falling edge is the STOP, the rising edge after at
+        least Tbuf the START, with no upper limit on the time until the
+        first clock. The rising edge that ends every transfer therefore
+        already is the START of the next sensor transfer, and the leading
+        LOW pulse is only sent while no such edge has occurred yet (first
+        transfer after open()). This halves the GPIO writes per transfer.
+
+        The LOW pulses last a few microseconds when driven from Python, well
+        above Tbuf = 200 ns. They select the flash without any clock, which
+        the flash ignores.
+        """
+        s_lvl = self._cs_high               # level that selects the sensor
+        self._set_ee(s_lvl)                 # idle
+        if sensor:
+            if not self._start_armed:
+                self._set_ee(not s_lvl)     # stop / Tbuf
+                self._set_ee(s_lvl)         # start
+            try:
+                return self._spi_transfer(tx)
+            finally:
+                self._set_ee(not s_lvl)     # stop
+                self._set_ee(s_lvl)         # idle = start of the next one
+                self._start_armed = True
         else:
-            self._spi.cs_high = not self._cs_high
-        self._sel_sensor = False
+            self._set_ee(not s_lvl)         # flash CE# active
+            try:
+                return self._spi_transfer(tx)
+            finally:
+                self._set_ee(s_lvl)         # flash CE# inactive = idle
+                self._start_armed = True    # rising edge = sensor start
 
     def _write_register(self, cmd: int, value: int) -> None:
         """
         SPI write (Figure 8):  EE_Enable | CMD | VALUE | EE_Enable
         """
-        self._select_sensor()
-        self._spi.xfer2([cmd & 0xFF, value & 0xFF])
+        io = self._io
+        io.tx_write[0] = cmd & 0xFF
+        io.tx_write[1] = value & 0xFF
+        self._xfer(io.xf_write, sensor=True)
 
-    def _read_command(self, cmd: int, length: int) -> bytes:
+    def _read_both_halves(self, xfers) -> None:
         """
-        SPI read (Figure 9): send the 8-bit command, then clock out *length*
-        bytes while EE_Enable stays asserted.
+        SPI read (Figure 9) of the top and the bottom half: send the 8-bit
+        command, then clock out 1606 bytes while EE_Enable stays asserted.
+        *xfers* is a [top, bottom] pair of descriptors from _alloc_io(); the
+        data lands in their rx buffers.
         """
-        self._select_sensor()
-
-        if length + 1 > self._max_xfer:
-            raise SPI_HTPA160x120dR1Error(
-                f"Requested transfer of {length + 1} bytes exceeds the SPI "
-                f"buffer size of {self._max_xfer} bytes. Increase the spidev "
-                f"'bufsiz' module parameter or lower max_xfer_bytes."
-            )
-
-        rx = self._spi.xfer2([cmd & 0xFF] + [0x00] * length)
-
-        return bytes(rx[1:])
-
-    def _read_both_halves(self):
-        """Read the top and the bottom half of the current block."""
-        top_raw = self._read_command(_CMD_READ_TOP, _READ_BYTES)
-        bot_raw = self._read_command(_CMD_READ_BOT, _READ_BYTES)
-        return top_raw, bot_raw
+        for xf in xfers:
+            self._xfer(xf, sensor=True)
 
     def _wait_eoc(self) -> None:
         """Poll the status register until EOC is set or the timeout expires."""
@@ -1275,34 +1705,30 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         Reads are split into chunks so that a single SPI transfer stays within
         the spidev buffer size.
         """
-        self._select_flash()
+        result = bytearray()
+        max_chunk = self._max_xfer - 4      # 1 command + 3 address bytes
 
-        try:
-            result = bytearray()
-            max_chunk = self._max_xfer - 4      # 1 command + 3 address bytes
+        if max_chunk <= 0:
+            raise SPI_HTPA160x120dR1Error(
+                f"max_xfer_bytes ({self._max_xfer}) is too small for a "
+                f"flash read."
+            )
 
-            if max_chunk <= 0:
-                raise SPI_HTPA160x120dR1Error(
-                    f"max_xfer_bytes ({self._max_xfer}) is too small for a "
-                    f"flash read."
-                )
+        while length > 0:
+            chunk = min(length, max_chunk)
 
-            while length > 0:
-                chunk = min(length, max_chunk)
+            tx = [_FLASH_CMD_READ,
+                  (mem_addr >> 16) & 0xFF,
+                  (mem_addr >> 8) & 0xFF,
+                  mem_addr & 0xFF] + [0x00] * chunk
 
-                tx = [_FLASH_CMD_READ,
-                      (mem_addr >> 16) & 0xFF,
-                      (mem_addr >> 8) & 0xFF,
-                      mem_addr & 0xFF] + [0x00] * chunk
+            # Each chunk is its own flash command, framed by its own
+            # falling and rising EE_Enable edge
+            rx = self._xfer(tx, sensor=False)
 
-                rx = self._spi.xfer2(tx)
-
-                result += bytes(rx[4:])
-                mem_addr += chunk
-                length -= chunk
-        finally:
-            # Always hand the bus back to the sensor
-            self._select_sensor()
+            result += bytes(rx[4:])
+            mem_addr += chunk
+            length -= chunk
 
         return bytes(result)
 

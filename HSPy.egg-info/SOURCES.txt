@@ -35,11 +35,14 @@ hspy/cv/tracker.py
 hspy/drivers/HSComUSB.py
 hspy/drivers/USB2Port.py
 hspy/drivers/__init__.py
+hspy/drivers/_frame.py
 hspy/drivers/i2c/__init__.py
 hspy/drivers/i2c/db.py
 hspy/drivers/i2c/drivers.py
 hspy/drivers/spi/__init__.py
 hspy/drivers/spi/drivers.py
+hspy/drivers/udp/__init__.py
+hspy/drivers/udp/drivers.py
 hspy/drivers/usb/__init__.py
 hspy/drivers/usb/usb.py
 hspy/ipc/__init__.py
@@ -50,4 +53,5 @@ hspy/ipc/processes_base.py
 hspy/ipc/threads.py
 hspy/ipc/threads_base.py
 hspytools/__init__.py
+tests/test_frame_contract.py
 tests/test_importBCC_160x120.py

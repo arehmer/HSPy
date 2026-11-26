@@ -41,3 +41,4 @@ include = ["hspy*"]
 # Replaces package_data; include_package_data is already on by default here.
 [tool.setuptools.package-data]
 "hspy.arraytypes" = ["*.json"]
+"hspy" = ["luts/*.csv"]

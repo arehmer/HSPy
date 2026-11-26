@@ -47,6 +47,7 @@ import usb.backend.libusb1
 import libusb_package
 
 from hspy.tparray import TPArray
+from hspy.drivers._frame import AUX_FROM_DATACOLS, new_frame
 
 
 # ── USB identification ───────────────────────────────────────────────────────
@@ -73,10 +74,10 @@ _RESP_CALIB_WRITE_DONE  = 'Write was successful'
 # ── Stream framing ───────────────────────────────────────────────────────────
 _SYNC_WORDS = (0xB0D0, 0xF046)                  # last two uint16 words of every frame
 
-# TPArray.DataCols group -> key in the dict returned by acquire_frame()
-# (names as in the I2C driver where it has the same quantity)
-_FRAME_PART_KEYS = {'e_off': 'eloff', 'vdd': 'vdd', 'T_amb': 'Tamb',
-                    'PTAT': 'ptat', 'ATC': 'atc'}
+# TPArray.DataCols group -> key in the frame dict. Shared with the UDP
+# driver, which has to make the same translation, and defined once in
+# hspy.drivers._frame together with the rest of the frame contract.
+_FRAME_PART_KEYS = AUX_FROM_DATACOLS
 _SYNC_BYTES = struct.pack('<2H', *_SYNC_WORDS)  # same, as they appear on the wire
 _N_SYNC     = len(_SYNC_WORDS)
 
@@ -158,6 +159,8 @@ class USB_HTPA(USB_Driver):
                  idVendor: int = _VID,
                  idProduct: int = _PID,
                  timeout_ms: int = _T_DEFAULT_MS,
+                 DevID: int = -1,
+                 keep_raw: bool = False,
                  auto_init: bool = True):
         """
         Parameters
@@ -165,7 +168,18 @@ class USB_HTPA(USB_Driver):
         serial_number : USB serial number of the device to open. None opens
                         the first device found.
         idVendor, idProduct : USB IDs.
-        timeout_ms    : Default timeout for frame reads.
+        timeout_ms    : Default timeout for frame reads, and the one
+                        acquire_frame() uses.
+        DevID         : Optional device number, copied into every frame as
+                        frame['DevID'] so that a consumer fed by several
+                        devices can tell them apart. -1 (default) means "not
+                        set"; USB devices are identified by frame['serial']
+                        anyway.
+        keep_raw      : If True, every frame carries the undecoded frame
+                        words under frame['raw']. Off by default: they
+                        roughly double the size of a pickled frame, which
+                        matters for the fixed-size slots of a
+                        SharedMemoryQueue.
         auto_init     : If True (default) call init() right after opening,
                         i.e. query version + configuration and determine
                         ArrayType and frame length - analogous to the I2C
@@ -179,6 +193,12 @@ class USB_HTPA(USB_Driver):
         self._vid = idVendor
         self._pid = idProduct
         self._timeout_ms = timeout_ms
+
+        # Acquisition options. Plain attributes, so that a caller can change
+        # them between frames; acquire_frame() itself takes no arguments, the
+        # same as every other driver in hspy.drivers.
+        self.DevID = DevID
+        self.keep_raw = keep_raw
 
         self._dev = None
         self._ep_in = None
@@ -241,6 +261,14 @@ class USB_HTPA(USB_Driver):
     @property
     def stream_cmd(self) -> Optional[bytes]:
         return self._stream_cmd
+
+    @property
+    def calcdK(self) -> bool:
+        """
+        True if frames carry 'pix_dK'. Read-only: the device applies its own
+        look-up table when streaming with b'K', the host never does.
+        """
+        return self._stream_cmd == _CMD_STREAM_DK
 
     @property
     def width(self) -> Optional[int]:
@@ -611,62 +639,68 @@ class USB_HTPA(USB_Driver):
             f"Sync error: expected 0x{_SYNC_WORDS[0]:04X} 0x{_SYNC_WORDS[1]:04X}, "
             f"got 0x{got[0]:04X} 0x{got[1]:04X} - dropped {dropped} bytes to re-align")
 
-    def acquire_frame(self, timeout_ms: Optional[int] = None) -> dict:
+    def acquire_frame(self) -> dict:
         """
-        Acquire one frame from the running stream and split it up. Intended
-        to be called once per loop iteration by USB_Client / USB_ClientProcess,
-        exactly like I2C_HTPA32x32d.acquire_frame().
+        Acquire one frame from the running stream and split it up.
+
+        Takes no arguments: what it does is set by the attributes
+        (timeout_ms, keep_raw, DevID), so that this call is identical for
+        every driver in hspy.drivers and an acquisition loop does not have to
+        know which one it is driving. Intended to be called once per loop
+        iteration by USB_Client / USB_ClientProcess.
 
         Returns
         -------
         dict
-            'pix'           : np.ndarray uint16, width*height pixel values
-                              (flattened, row-major - same convention as the
-                              I2C driver)
-            'pix_dK'        : same array, only present for the b'K' stream
-                              (values are in dK)
-            'aux'           : remaining non-pixel words of the frame (offsets,
-                              PTAT, VDD, ...; layout depends on DesignGen)
-            'eloff', 'vdd', 'Tamb', 'ptat', 'atc'
-                            : the parts of 'aux', split according to
-                              TPArray.DataCols (np.ndarray each; a part the
-                              array type does not have is missing)
-            'ptat_avg'      : mean of 'ptat' (float), same key as in the
-                              I2C driver
-            'frame_raw'     : the complete frame without sync words
-            't'             : datetime of acquisition
-            'serial_number' : device serial number
-            'ArrayType'     : device ArrayType
-
-            Does NOT contain 'success' or 'image_id' - the calling thread /
-            process adds those.
+            The frame dictionary documented in ``hspy.drivers._frame``:
+            always 'frame' / 'frame_unit' plus identity, time and auxiliary
+            data. Which pixel stage it carries depends on the stream command:
+            b'K' gives 'pix_dK' (frame_unit 'dK'), anything else gives 'pix'
+            (frame_unit 'digits'). Does NOT contain 'success' or 'image_id' -
+            the calling thread / process adds those.
         """
         if not self._streaming:
             raise USB_HTPAError("Stream not running: call start_stream() first.")
         if self.n_pixels is None:
             raise USB_HTPAError("ArrayType unknown: call init() or set_array_type().")
 
-        frame = self.read_frame(timeout_ms)
+        words = self.read_frame(self._timeout_ms)
+        t = datetime.now()
+        t_mono = time.monotonic()
+
         n = self.n_pixels
-
-        data = {'pix': frame[:n],
-                'aux': frame[n:],
-                'frame_raw': frame,
-                't': datetime.now(),
-                'serial_number': self.serial_number,
-                'ArrayType': self.ArrayType}
-
-        if self._stream_cmd == _CMD_STREAM_DK:
-            data['pix_dK'] = data['pix']
+        pixels = words[:n]
 
         # Non-pixel parts of the frame: 'eloff', 'vdd', 'Tamb', 'ptat', 'atc'
-        # (views into frame_raw, no copies), plus the PTAT average
-        for key, start, stop in self._frame_parts:
-            data[key] = frame[start:stop]
-        if 'ptat' in data:
-            data['ptat_avg'] = float(data['ptat'].mean())
+        # (views into the frame words, no copies)
+        parts = {key: words[start:stop]
+                 for key, start, stop in self._frame_parts}
 
-        return data
+        # b'K' streams object temperatures in dK, every other command streams
+        # values the frame dict calls digits
+        stage = ({'pix_dK': pixels} if self._stream_cmd == _CMD_STREAM_DK
+                 else {'pix': pixels})
+
+        # The undecoded frame, plus the part of it this ArrayType's layout
+        # did not account for (which is everything after the pixels when
+        # _frame_parts came out empty)
+        raw = ({'frame_raw': words, 'aux': words[n:]}
+               if self.keep_raw else None)
+
+        return new_frame(interface='usb',
+                         ArrayType=self.ArrayType,
+                         shape=(self.tparray.height, self.tparray.width),
+                         DevID=self.DevID,
+                         serial=self.serial_number,
+                         t=t,
+                         t_mono=t_mono,
+                         eloff=parts.get('eloff'),
+                         ptat=parts.get('ptat'),
+                         vdd=parts.get('vdd'),
+                         atc=parts.get('atc'),
+                         Tamb=parts.get('Tamb'),
+                         raw=raw,
+                         **stage)
 
     # ── Calibration data ─────────────────────────────────────────────────────
 
