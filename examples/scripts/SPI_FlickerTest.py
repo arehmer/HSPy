@@ -28,6 +28,7 @@ priority of the acquisition thread:
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --warmup
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --early
 
 Analyse a recording again, e.g. on the PC:
 python ./SPI_FlickerTest.py --analyze flicker_e8_g50.npz
@@ -58,9 +59,15 @@ Command-line Arguments
     discard it, so that block 0 follows a conversion like every other block
     instead of a longer idle time. Tests whether block 0 flickers because
     the sensor settles at the start of a frame.
+--early : flag
+    Start block 0 of the next frame right after the last conversion of a
+    frame has been read, instead of on the next call of acquire_raw(), so
+    that block 0 follows the previous conversion as closely as every other
+    block. Prototype of that driver change. Not together with --warmup.
 --out : str (optional)
     File the recording is saved to (default flicker_e<n>_g<ms>.npz or
-    flicker_e<n>_pipe_rt<priority>.npz, with _w appended for --warmup).
+    flicker_e<n>_pipe_rt<priority>.npz, with _w appended for --warmup and
+    _early for --early).
 --analyze : str (optional)
     Skip recording, only analyse this .npz file.
 """
@@ -123,7 +130,7 @@ def make_ee_enable(pin: int = 8, chip: int = 0):
 
 def record(d, n_frames: int, gap_ms: float = 0.0,
            target: tuple = None, rt_priority: int = None,
-           warmup: bool = False) -> dict:
+           warmup: bool = False, early: bool = False) -> dict:
     """
     Record n_frames raw frames with driver d, see module docstring.
 
@@ -132,9 +139,12 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
     of spi-udp-threaded.py (acquisition, processing, UDP server to target),
     with the acquisition thread at rt_priority; gap_ms is ignored.
     warmup: one discarded conversion of block 0 in front of every frame.
+    early: block 0 of the next frame is started right after the last
+    conversion of a frame has been read (prototype of a driver change).
     """
+    from datetime import datetime
     from hspy.drivers.spi.drivers import (_CMD_CONFIG, _BIT_START, _BIT_BLIND,
-                                          _BIT_WAKEUP)
+                                          _BIT_WAKEUP, _SHIFT_BLOCK)
 
     if target is not None:
         import sys
@@ -164,6 +174,31 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
 
     d._write_register = logged_write_register
 
+    # Early start: perf_counter of the START of block 0 that the previous
+    # frame already sent, None if block 0 has not been started yet
+    early_start = [None]
+
+    def read_frame_early() -> dict:
+        # As SPI_HTPA160x120dR1.read_frame(), but block 0 may already run
+        t_block = d._calib["t_block"]
+        for block in range(_BLOCKS):
+            if block == 0 and early_start[0] is not None:
+                # Sleep only what is left of 90 % of the conversion time
+                rest = early_start[0] + 0.9 * t_block * 1e-3 - time.perf_counter()
+                if rest > 0:
+                    time.sleep(rest)
+                early_start[0] = None
+            else:
+                d._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START
+                                  | (block << _SHIFT_BLOCK))
+                time.sleep(0.9 * t_block * 1e-3)
+            d._wait_eoc()
+            d._read_both_halves(d._io.xf_frame[block])
+        return {'pix_raw': d._io.rx_frame.copy(), 't': datetime.now()}
+
+    if early:
+        d.read_frame = read_frame_early          # instance attribute
+
     # One acquire_raw() plus its timing; runs in the acquiring thread
     raws, gap, dt_blocks, phase = [], [], [], []
     intervals = []          # START-to-START before each of the 12 blocks
@@ -175,6 +210,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                     and os.sched_getscheduler(0) == os.SCHED_FIFO)
             rt_actual.append(os.sched_getparam(0).sched_priority if fifo else -1)
         first = len(starts)
+        started_early = early_start[0] is not None
         if warmup:
             # Same steps as one block of read_frame(), data thrown away
             # (read_frame() overwrites the buffer again)
@@ -188,7 +224,13 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
         # read_frame() runs before the BLIND conversion, so the first
         # START of this frame is block 0
         t_block = [t for t, blind in starts[first:] if not blind]
-        if warmup:
+        if started_early:
+            # Block 0 was started at the end of the previous frame: it is
+            # the last START before this one, the one before it is block 11
+            # or BLIND of the previous frame
+            t_block = [starts[first - 1][0]] + t_block
+            gap.append(t_block[0] - starts[first - 2][0])
+        elif warmup:
             # gap = from the warm-up START to the START of block 0
             gap.append(t_block[1] - t_block[0])
             t_block = t_block[1:]
@@ -197,6 +239,11 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
         dt_blocks.append(np.median(np.diff(t_block)))
         intervals.append([gap[-1]] + list(np.diff(t_block)))
         raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
+        if early:
+            # Start block 0 of the next frame now: the rest of this frame's
+            # bookkeeping then overlaps with its conversion
+            d._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START)
+            early_start[0] = time.perf_counter()
         return raw
 
     try:
@@ -226,6 +273,8 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                     t.join()
     finally:
         d._write_register = write_register
+        if early:
+            del d.read_frame
 
     # Convert after the recording, so that it adds no load while recording
     n = min(n_frames, len(raws))
@@ -246,7 +295,10 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                 gap_max_ms=gap_ms if target is None else np.nan,
                 pipeline=target is not None,
                 rt_priority=rt_actual[0] if rt_actual else -1,
-                warmup=warmup)
+                warmup=warmup, early=early,
+                # digits -> compensated signal per pixel, 1 / sensitivity
+                # (Section 15.5); shows what the noise means in the image
+                scale=np.asarray(d._calib["scale"]))
 
 
 def analyze(r) -> None:
@@ -264,6 +316,8 @@ def analyze(r) -> None:
         mode = f"extra gap 0..{float(r['gap_max_ms']):.0f} ms"
     if 'warmup' in getattr(r, 'files', r) and r['warmup']:
         mode += ", warm-up conversion before block 0"
+    if 'early' in getattr(r, 'files', r) and r['early']:
+        mode += ", block 0 started early"
     print(f"\n{n} frames, eloff_every={int(r['eloff_every'])}, {mode}")
     print(f"START-to-START before block 0: median {np.nanmedian(gap):.1f} ms, "
           f"min {np.nanmin(gap):.1f}, max {np.nanmax(gap):.1f}, "
@@ -375,6 +429,36 @@ def analyze(r) -> None:
         print(f"  phase {int(p)}: {b0[sel].mean():+8.2f} digits "
               f"(std {b0[sel].std():.2f}, n={sel.sum()})")
 
+    # Noise of the single pixels by region: temporal noise of every pixel,
+    # with the common mode of its block removed, in digits and, where the
+    # recording has the calibration scale, relative to the image centre
+    # after calibration (what the image shows; lower sensitivity in the
+    # corners turns the same digits into more temperature noise)
+    d = np.diff(img, axis=0)                                        # (n-1, 120, 160)
+    for h in range(2):
+        for b in range(_BLOCKS):
+            rows = (_ROW_HALF == h) & (_ROW_BLOCK == b)
+            d[:, rows] -= d[:, rows].mean(axis=(1, 2), keepdims=True)
+    sp = np.sqrt((d ** 2).mean(axis=0) / 2)                         # (120, 160)
+    rr, cc = np.mgrid[:_ROWS, :_COLS]
+    corner = (np.minimum(rr, _ROWS - 1 - rr) < 10) & (np.minimum(cc, _COLS - 1 - cc) < 20)
+    centre = (abs(rr - 59.5) < 20) & (abs(cc - 79.5) < 40)
+    has_scale = 'scale' in getattr(r, 'files', r)
+    if has_scale:
+        sc = r['scale'].reshape(_ROWS, _COLS)
+        spc = sp * sc / np.median((sp * sc)[centre])
+        sc = sc / np.median(sc[centre])
+    print("\nNoise of single pixels (block common mode removed), median / 95th percentile:")
+    print("region        | digits        " + ("| calibrated, rel. to centre | scale rel. to centre" if has_scale else ""))
+    for name, sel in (('centre', centre), ('corners', corner),
+                      ('rest', ~centre & ~corner)):
+        line = f"{name:13s} | {np.median(sp[sel]):5.2f} {np.percentile(sp[sel], 95):6.2f}  "
+        if has_scale:
+            line += (f"| {np.median(spc[sel]):5.2f} {np.percentile(spc[sel], 95):6.2f}"
+                     f"               | {np.median(sc[sel]):5.2f}")
+        print(line)
+    print(f"5 noisiest pixels [digits]: {np.sort(sp.ravel())[-5:].round(1)}")
+
     print("\nPTAT / VDD per block: frame-to-frame rms change [digits], "
           "block 0 vs. blocks 1..11")
     for name in ('ptat', 'vdd'):
@@ -392,7 +476,9 @@ if __name__ == '__main__':
     p.add_argument('--pipeline', type=str, default=None, metavar='TARGET_IP')
     p.add_argument('--target_port', type=int, default=5005)
     p.add_argument('--rt_priority', type=int, default=None)
-    p.add_argument('--warmup', action='store_true')
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--warmup', action='store_true')
+    g.add_argument('--early', action='store_true')
     p.add_argument('--out', type=str, default=None)
     p.add_argument('--analyze', type=str, default=None)
     args = p.parse_args()
@@ -407,7 +493,7 @@ if __name__ == '__main__':
         target = (args.pipeline, args.target_port) if args.pipeline else None
         try:
             r = record(d, args.frames, args.gap_ms, target, args.rt_priority,
-                       args.warmup)
+                       args.warmup, args.early)
         finally:
             d.close()
         if target:
@@ -416,6 +502,8 @@ if __name__ == '__main__':
             name = f"g{args.gap_ms:g}"
         if args.warmup:
             name += "_w"
+        if args.early:
+            name += "_early"
         out = args.out or f"flicker_e{args.eloff_every}_{name}.npz"
         np.savez_compressed(out, **r)
         print(f"Saved {out}")
