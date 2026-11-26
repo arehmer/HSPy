@@ -27,6 +27,7 @@ Under the real load of spi-udp-threaded.py, at normal and at real-time
 priority of the acquisition thread:
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22
 python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20
+python ./SPI_FlickerTest.py --bus 0 --frames 300 --pipeline 192.168.178.22 --rt_priority 20 --warmup
 
 Analyse a recording again, e.g. on the PC:
 python ./SPI_FlickerTest.py --analyze flicker_e8_g50.npz
@@ -52,9 +53,14 @@ Command-line Arguments
 --rt_priority : int (optional)
     With --pipeline: SCHED_FIFO priority of the acquisition thread (see
     spi-udp-threaded.py for the one-time setup). Default: normal priority.
+--warmup : flag
+    Before block 0 of every frame, run one extra conversion of block 0 and
+    discard it, so that block 0 follows a conversion like every other block
+    instead of a longer idle time. Tests whether block 0 flickers because
+    the sensor settles at the start of a frame.
 --out : str (optional)
     File the recording is saved to (default flicker_e<n>_g<ms>.npz or
-    flicker_e<n>_pipe_rt<priority>.npz).
+    flicker_e<n>_pipe_rt<priority>.npz, with _w appended for --warmup).
 --analyze : str (optional)
     Skip recording, only analyse this .npz file.
 """
@@ -116,7 +122,8 @@ def make_ee_enable(pin: int = 8, chip: int = 0):
 
 
 def record(d, n_frames: int, gap_ms: float = 0.0,
-           target: tuple = None, rt_priority: int = None) -> dict:
+           target: tuple = None, rt_priority: int = None,
+           warmup: bool = False) -> dict:
     """
     Record n_frames raw frames with driver d, see module docstring.
 
@@ -124,8 +131,10 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
     0..gap_ms between frames. target=(ip, port): the real threaded pipeline
     of spi-udp-threaded.py (acquisition, processing, UDP server to target),
     with the acquisition thread at rt_priority; gap_ms is ignored.
+    warmup: one discarded conversion of block 0 in front of every frame.
     """
-    from hspy.drivers.spi.drivers import _CMD_CONFIG, _BIT_START, _BIT_BLIND
+    from hspy.drivers.spi.drivers import (_CMD_CONFIG, _BIT_START, _BIT_BLIND,
+                                          _BIT_WAKEUP)
 
     if target is not None:
         import sys
@@ -165,13 +174,25 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                     and os.sched_getscheduler(0) == os.SCHED_FIFO)
             rt_actual.append(os.sched_getparam(0).sched_priority if fifo else -1)
         first = len(starts)
+        if warmup:
+            # Same steps as one block of read_frame(), data thrown away
+            # (read_frame() overwrites the buffer again)
+            d._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START)
+            time.sleep(0.9 * d._calib["t_block"] * 1e-3)
+            d._wait_eoc()
+            d._read_both_halves(d._io.xf_frame[0])
         raw = d.acquire_raw()
         phase.append(d._n_since_eloff)           # 1 = fresh eloff this frame
 
         # read_frame() runs before the BLIND conversion, so the first
         # START of this frame is block 0
         t_block = [t for t, blind in starts[first:] if not blind]
-        gap.append(t_block[0] - starts[first - 1][0] if first else np.nan)
+        if warmup:
+            # gap = from the warm-up START to the START of block 0
+            gap.append(t_block[1] - t_block[0])
+            t_block = t_block[1:]
+        else:
+            gap.append(t_block[0] - starts[first - 1][0] if first else np.nan)
         dt_blocks.append(np.median(np.diff(t_block)))
         raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
         return raw
@@ -221,7 +242,8 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                 phase=np.array(phase[:n]), eloff_every=d.eloff_every,
                 gap_max_ms=gap_ms if target is None else np.nan,
                 pipeline=target is not None,
-                rt_priority=rt_actual[0] if rt_actual else -1)
+                rt_priority=rt_actual[0] if rt_actual else -1,
+                warmup=warmup)
 
 
 def analyze(r) -> None:
@@ -237,6 +259,8 @@ def analyze(r) -> None:
                 f"{'normal' if rt < 0 else f'SCHED_FIFO {rt}'}")
     else:
         mode = f"extra gap 0..{float(r['gap_max_ms']):.0f} ms"
+    if 'warmup' in getattr(r, 'files', r) and r['warmup']:
+        mode += ", warm-up conversion before block 0"
     print(f"\n{n} frames, eloff_every={int(r['eloff_every'])}, {mode}")
     print(f"START-to-START before block 0: median {np.nanmedian(gap):.1f} ms, "
           f"min {np.nanmin(gap):.1f}, max {np.nanmax(gap):.1f}, "
@@ -345,6 +369,7 @@ if __name__ == '__main__':
     p.add_argument('--pipeline', type=str, default=None, metavar='TARGET_IP')
     p.add_argument('--target_port', type=int, default=5005)
     p.add_argument('--rt_priority', type=int, default=None)
+    p.add_argument('--warmup', action='store_true')
     p.add_argument('--out', type=str, default=None)
     p.add_argument('--analyze', type=str, default=None)
     args = p.parse_args()
@@ -358,13 +383,16 @@ if __name__ == '__main__':
                                eloff_every=args.eloff_every)
         target = (args.pipeline, args.target_port) if args.pipeline else None
         try:
-            r = record(d, args.frames, args.gap_ms, target, args.rt_priority)
+            r = record(d, args.frames, args.gap_ms, target, args.rt_priority,
+                       args.warmup)
         finally:
             d.close()
         if target:
             name = f"pipe_rt{args.rt_priority or 0}"
         else:
             name = f"g{args.gap_ms:g}"
+        if args.warmup:
+            name += "_w"
         out = args.out or f"flicker_e{args.eloff_every}_{name}.npz"
         np.savez_compressed(out, **r)
         print(f"Saved {out}")
