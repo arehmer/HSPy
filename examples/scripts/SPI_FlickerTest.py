@@ -87,6 +87,22 @@ def block_means(img: np.ndarray) -> np.ndarray:
     return out
 
 
+def _flicker(px: np.ndarray, ref: np.ndarray) -> tuple:
+    """
+    px (N, ...) pixel values per frame, ref (N,) reference per frame.
+    Returns, each as rms frame-to-frame change / sqrt(2):
+    the flicker of the mean of px minus ref, the part of it the independent
+    noise of the pixels explains, and that noise of a single pixel.
+    """
+    d = np.diff(px.reshape(len(px), -1), axis=0)
+    p = d.shape[1]
+    c = d.mean(axis=1)
+    e2 = ((d - c[:, None]) ** 2).mean()           # = sigma^2 (1 - 1/p) * 2
+    c = c - np.diff(ref)
+    return (np.sqrt((c ** 2).mean() / 2), np.sqrt(e2 / (p - 1) / 2),
+            np.sqrt(e2 * p / (p - 1) / 2))
+
+
 def make_ee_enable(pin: int = 8, chip: int = 0):
     import lgpio
     h = lgpio.gpiochip_open(chip)
@@ -229,23 +245,78 @@ def analyze(r) -> None:
 
     # Frame-to-frame flicker of each block relative to the mean of blocks
     # 1..11 of its half, so neither a common drift of the whole image nor
-    # block 0 itself leaks into the reference:
-    # rms of the change from one frame to the next, / sqrt(2) = per-frame noise
-    print("\nFlicker per block [digits] = rms frame-to-frame change of "
-          "(block mean - mean of blocks 1..11) / sqrt(2)")
-    print("block | raw top  raw bot | pix-eloff top  pix-eloff bot")
-    rel = {}
-    for name, img in (('raw', pix), ('comp', comp)):
-        m = block_means(img)
-        rel[name] = m - m[:, :, 1:].mean(axis=2, keepdims=True)
-    flick = {k: np.sqrt((np.diff(v, axis=0) ** 2).mean(axis=0) / 2)
-             for k, v in rel.items()}
+    # block 0 itself leaks into the reference. Electrical offsets are the
+    # same for every block and cancel here, so only pix-eloff is shown.
+    # The flicker of a block mean has two parts: a common mode all pixels
+    # of the block share (seen as flicker of the block) and the independent
+    # noise of its pixels averaged over the block, larger the noisier the
+    # pixels are (corners). The latter is estimated from the scatter of the
+    # pixels around their block mean and taken out.
+    img = comp.reshape(n, _ROWS, _COLS)
+    ref = np.stack([img[:, (_ROW_HALF == h) & (_ROW_BLOCK >= 1)].mean(axis=(1, 2))
+                    for h in range(2)], axis=1)                     # (n, 2)
+    tot, flo, sig = (np.empty((2, _BLOCKS)) for _ in range(3))
+    for h in range(2):
+        for b in range(_BLOCKS):
+            tot[h, b], flo[h, b], sig[h, b] = _flicker(
+                img[:, (_ROW_HALF == h) & (_ROW_BLOCK == b)], ref[:, h])
+
+    # Tilt: a line across the 12 blocks of a half whose slope changes from
+    # frame to frame (an offset drifting during the frame, as the blocks are
+    # converted one after the other). It is fitted per frame to blocks 1..11
+    # only, so that block 0 does not pull it, and removed from all blocks.
+    m = block_means(comp)
+    rel = m - m[:, :, 1:].mean(axis=2, keepdims=True)
+    x = np.arange(_BLOCKS) - (_BLOCKS - 1) / 2
+    xc = x - x[1:].mean()
+    sxx = (xc[1:] ** 2).sum()
+    slope = (rel[:, :, 1:] * xc[1:]).sum(axis=2) / sxx              # (n, 2)
+    res = rel - rel[:, :, 1:].mean(axis=2, keepdims=True) - slope[:, :, None] * xc
+    tot_res = np.sqrt((np.diff(res, axis=0) ** 2).mean(axis=0) / 2)
+    # Pixel noise left in the residual: less for the fitted blocks 1..11,
+    # more for the extrapolated block 0
+    lev = 1 / (_BLOCKS - 1) + xc ** 2 / sxx
+    lev[0] = -lev[0]
+
+    def excess(t, f):
+        return np.sqrt(np.maximum(t ** 2 - f ** 2, 0))
+
+    print("\nFlicker per block [digits], pix-eloff rel. to blocks 1..11, "
+          "rms frame-to-frame change / sqrt(2):")
+    print("  pixel  = noise of a single pixel (mean over the block)")
+    print("  total  = flicker of the block mean")
+    print("  noise  = part of it explained by independent pixel noise")
+    print("  common = sqrt(total^2 - noise^2), flicker shared by the block")
+    print("  detilt = common, after removing the per-frame tilt across blocks")
+    print("      |            top half               |            bottom half")
+    print("block | pixel total noise common detilt | pixel total noise common detilt")
     for b in range(_BLOCKS):
-        print(f"{b:5d} | {flick['raw'][0, b]:7.2f} {flick['raw'][1, b]:8.2f} | "
-              f"{flick['comp'][0, b]:13.2f} {flick['comp'][1, b]:14.2f}")
+        print(f"{b:5d} |" + " |".join(
+            f"{sig[h, b]:6.1f}{tot[h, b]:6.2f}{flo[h, b]:6.2f}"
+            f"{excess(tot[h, b], flo[h, b]):7.2f}"
+            f"{excess(tot_res[h, b], flo[h, b] * np.sqrt(1 - lev[b])):7.2f}"
+            for h in range(2)))
+    ds = np.diff(slope.mean(axis=1))
+    print(f"Tilt: rms frame-to-frame change of block 11 - block 0 = "
+          f"{np.sqrt((ds ** 2).mean() / 2) * (_BLOCKS - 1):.2f} digits; "
+          f"corr. top/bottom {np.corrcoef(slope[:, 0], slope[:, 1])[0, 1]:+.2f}")
+    s = slope.mean(axis=1)
+    cs = [f"{name} {np.corrcoef(s, v)[0, 1]:+.2f}" for name, v in
+          (('gap', gap),
+           ('PTAT', r['ptat'][1:].reshape(n, -1).mean(axis=1)),
+           ('VDD', r['vdd'][1:].reshape(n, -1).mean(axis=1)))
+          if np.std(v) > 0]
+    print(f"Tilt slope corr. with {', '.join(cs)}")
+
+    # Block 0 row by row, in the order of the rows in the image
+    print("\nBlock 0 row by row [digits] (common = flicker shared by the row):")
+    print("image row | pixel total noise common")
+    for row in list(range(_ROWS_BLOCK)) + list(range(_ROWS - _ROWS_BLOCK, _ROWS)):
+        t, f, sp = _flicker(img[:, row:row + 1], ref[:, _ROW_HALF[row]])
+        print(f"{row:9d} |{sp:6.1f}{t:6.2f}{f:6.2f}{excess(t, f):7.2f}")
 
     # Block 0 against the gap and the eloff phase
-    b0 = rel['comp'][:, :, 0].mean(axis=1)           # top and bottom together
+    b0 = rel[:, :, 0].mean(axis=1)           # top and bottom together
     g = gap
     if np.std(g) > 0:
         k, c0 = np.polyfit(g, b0, 1)
