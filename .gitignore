@@ -1,2 +1,4 @@
 HSPyTools.egg-info/
 .venv/
+
+*.pyc
