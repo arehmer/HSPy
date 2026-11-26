@@ -849,7 +849,7 @@ class UDP_PickleServer(RThread_R1):
         # Get data (e.g. a dict with a numpy array / pandas DataFrame)
         # from the upstream buffer
         data = self._get()
-        
+        data = {}
         # Serialize it
         payload = pkl.dumps(data)
 
