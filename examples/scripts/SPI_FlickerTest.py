@@ -178,6 +178,10 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
     # frame already sent, None if block 0 has not been started yet
     early_start = [None]
 
+    def start_block0() -> None:
+        d._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START)
+        early_start[0] = time.perf_counter()
+
     def read_frame_early() -> dict:
         # As SPI_HTPA160x120dR1.read_frame(), but block 0 may already run
         t_block = d._calib["t_block"]
@@ -194,10 +198,22 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                 time.sleep(0.9 * t_block * 1e-3)
             d._wait_eoc()
             d._read_both_halves(d._io.xf_frame[block])
+        # Start block 0 of the next frame right after the last read, unless
+        # acquire_raw() runs the BLIND conversion next (then after that)
+        if d._n_since_eloff < d.eloff_every:
+            start_block0()
         return {'pix_raw': d._io.rx_frame.copy(), 't': datetime.now()}
 
-    if early:
-        d.read_frame = read_frame_early          # instance attribute
+    read_electrical_offsets = d.read_electrical_offsets
+
+    def read_electrical_offsets_early() -> dict:
+        out = read_electrical_offsets()
+        start_block0()
+        return out
+
+    if early:                                    # instance attributes
+        d.read_frame = read_frame_early
+        d.read_electrical_offsets = read_electrical_offsets_early
 
     # One acquire_raw() plus its timing; runs in the acquiring thread
     raws, gap, dt_blocks, phase = [], [], [], []
@@ -224,6 +240,9 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
         # read_frame() runs before the BLIND conversion, so the first
         # START of this frame is block 0
         t_block = [t for t, blind in starts[first:] if not blind]
+        if early:
+            # The last START is already block 0 of the next frame
+            t_block = t_block[:-1]
         if started_early:
             # Block 0 was started at the end of the previous frame: it is
             # the last START before this one, the one before it is block 11
@@ -239,11 +258,6 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
         dt_blocks.append(np.median(np.diff(t_block)))
         intervals.append([gap[-1]] + list(np.diff(t_block)))
         raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
-        if early:
-            # Start block 0 of the next frame now: the rest of this frame's
-            # bookkeeping then overlaps with its conversion
-            d._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START)
-            early_start[0] = time.perf_counter()
         return raw
 
     try:
@@ -274,7 +288,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
     finally:
         d._write_register = write_register
         if early:
-            del d.read_frame
+            del d.read_frame, d.read_electrical_offsets
 
     # Convert after the recording, so that it adds no load while recording
     n = min(n_frames, len(raws))
