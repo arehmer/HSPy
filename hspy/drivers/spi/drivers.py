@@ -18,13 +18,13 @@ Chip select (Section 12):
       EE_Enable = LOW   ->  internal flash selected
 
   EE_Enable therefore is a chip select for both devices, active HIGH for
-  the sensor and active LOW for the flash, and has to produce one edge pair
-  per transfer. Between transfers it rests HIGH, so that the flash is never
-  selected while the bus is idle (handling notice for the internal flash);
-  a sensor frame is delimited by short LOW pulses (Figures 12 to 14). On current Raspberry Pi kernels SPI_CS_HIGH is no longer
-  supported, so EE_Enable is driven from a GPIO (see ``ee_enable``) and
-  framed around every transfer in _xfer(). Because EE_Enable has to be
-  toggled, no other device may share these SPI lines.
+  the sensor and active LOW for the flash. It rests HIGH, so that the
+  flash is never selected while the bus is idle (handling notice for the
+  internal flash), and is not toggled around sensor transfers; only flash
+  transfers pull it LOW (see _xfer()). On current Raspberry Pi kernels
+  SPI_CS_HIGH is no longer supported, so EE_Enable is driven from a GPIO
+  (see ``ee_enable``). Because EE_Enable selects one of the two devices at
+  all times, no other device may share these SPI lines.
 
 Raspberry Pi setup - required device tree overlay (spi0-0cs):
   Why:
@@ -292,10 +292,9 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         max_speed_hz   : SPI clock, 13 MHz max (Table 5). The kernel never
                          exceeds it; on Raspberry Pi 3/4/5 the even clock
                          divider turns 13 MHz into 12.5 MHz.
-        sensor_cs_high : If True EE_Enable is pulsed HIGH for every sensor
-                         transfer and LOW for every flash transfer, matching
-                         Figures 8 and 9. Set to False if EE_Enable is
-                         inverted in hardware.
+        sensor_cs_high : If True EE_Enable rests HIGH (sensor selected) and
+                         is pulled LOW for every flash transfer only. Set to
+                         False if EE_Enable is inverted in hardware.
         ee_enable      : Required. Callable ``ee_enable(level: bool)`` that
                          sets the GPIO wired to EE_Enable (True = HIGH).
                          The SPI controller's own chip select cannot drive
@@ -415,10 +414,6 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # Last level written to EE_Enable; None = unknown
         self._ee_level: Optional[bool] = None
 
-        # True once the last transfer ended with a rising EE_Enable edge,
-        # which already is the START of the next sensor transfer (Figure 12)
-        self._start_armed = False
-
         # Look-up-table, set via the LuT property
         self._LuT: Optional[LuT] = None
 
@@ -468,7 +463,6 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         state['_io'] = None
         state['_ee_enable'] = None
         state['_ee_level'] = None
-        state['_start_armed'] = False
         state['_t_next'] = None
         return state
 
@@ -520,7 +514,6 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # selected (handling notice for the internal flash)
         self._ee_level = None
         self._set_ee(self._cs_high)
-        self._start_armed = False
 
         # Wait for the sensor to finish its power-on reset (Table 5)
         time.sleep(_T_STARTUP_US * 1e-6)
@@ -1622,47 +1615,31 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         the pre-built descriptors of _alloc_io() (returns None, the answer
         is in its rx buffer).
 
-        EE_Enable rests at the sensor level (HIGH) between transfers, so the
-        flash is never selected while the bus is idle (datasheet, handling
-        notice for the internal flash). Frames (Figures 12 to 14, Tbuf):
+        EE_Enable rests at the sensor level (HIGH), so the flash is never
+        selected while the bus is idle (datasheet, handling notice for the
+        internal flash). Sensor transfers do not toggle it at all; only a
+        flash transfer pulls it LOW:
 
-            sensor:  [LOW -> HIGH (start)] -> transfer -> LOW (stop) -> HIGH
-            flash :  LOW (CE# active)      -> transfer -> HIGH
+            sensor:  HIGH throughout
+            flash :  LOW (CE# active) -> transfer -> HIGH
 
-        Figure 12: the falling edge is the STOP, the rising edge after at
-        least Tbuf the START, with no upper limit on the time until the
-        first clock. The rising edge that ends every transfer therefore
-        already is the START of the next sensor transfer, and the leading
-        LOW pulse is only sent while no such edge has occurred yet (first
-        transfer after open()). This halves the GPIO writes per transfer.
-
-        The LOW pulses last a few microseconds when driven from Python, well
-        above Tbuf = 200 ns. They select the flash without any clock, which
-        the flash ignores.
+        The rising edge after a flash transfer lasts at least a few
+        microseconds when driven from Python, well above Tbuf = 200 ns,
+        before the next sensor transfer.
         """
         s_lvl = self._cs_high               # level that selects the sensor
-        self._set_ee(s_lvl)                 # idle
         if sensor:
-            if not self._start_armed:
-                self._set_ee(not s_lvl)     # stop / Tbuf
-                self._set_ee(s_lvl)         # start
-            try:
-                return self._spi_transfer(tx)
-            finally:
-                self._set_ee(not s_lvl)     # stop
-                self._set_ee(s_lvl)         # idle = start of the next one
-                self._start_armed = True
-        else:
-            self._set_ee(not s_lvl)         # flash CE# active
-            try:
-                return self._spi_transfer(tx)
-            finally:
-                self._set_ee(s_lvl)         # flash CE# inactive = idle
-                self._start_armed = True    # rising edge = sensor start
+            self._set_ee(s_lvl)             # no-op: it already rests there
+            return self._spi_transfer(tx)
+        self._set_ee(not s_lvl)             # flash CE# active
+        try:
+            return self._spi_transfer(tx)
+        finally:
+            self._set_ee(s_lvl)             # flash CE# inactive = idle
 
     def _write_register(self, cmd: int, value: int) -> None:
         """
-        SPI write (Figure 8):  EE_Enable | CMD | VALUE | EE_Enable
+        SPI write (Figure 8):  CMD | VALUE, with EE_Enable held HIGH
         """
         io = self._io
         io.tx_write[0] = cmd & 0xFF
