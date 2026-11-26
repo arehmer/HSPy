@@ -278,6 +278,8 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         max_xfer_bytes: int = _MAX_XFER_BYTES,
         timeout_factor: float = 4.0,
         eloff_every: int = 1,
+        warmup: bool = True,
+        early_start: bool = True,
         applyCalib: bool = True,
         keep_raw: bool = False,
         DevID: int = -1,
@@ -316,6 +318,21 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                          8th to 10th frame only, which this driver now keeps
                          track of itself -- the caller used to have to toggle
                          the old read_eloff argument frame by frame.
+        warmup         : if True (default), every frame starts with a dummy
+                         conversion of block 0 whose data is discarded.
+                         Block 0 settles much worse after a conversion of
+                         block 11 or a BLIND conversion than after one of its
+                         own block, which makes the top and bottom rows
+                         flicker. Costs one block conversion (~10 ms) per
+                         frame.
+        early_start    : if True (default), acquire_raw() starts the first
+                         conversion of the next frame (the warm-up, or block
+                         0) right after the last conversion of a frame has
+                         been read, so that the time from START to START is
+                         the same for every conversion, across the frame
+                         boundary too. The next read_frame() then only waits
+                         for it. The sensor is left converting between two
+                         calls; close() and sleep() end that.
         applyCalib     : apply the flash calibration, i.e. produce
                          frame['pix_comp']
         keep_raw       : if True, every frame carries the raw SPI bytes and
@@ -371,6 +388,8 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
         # Acquisition options (see the docstring above)
         self.eloff_every = int(eloff_every)
+        self.warmup      = warmup
+        self.early_start = early_start
         self.applyCalib  = applyCalib
         self.calcdK      = False        # set by load_lut() / the LuT property
         self.keep_raw    = keep_raw
@@ -380,6 +399,10 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         # itself decides when fresh electrical offsets are due. Starts at
         # eloff_every so that the very first frame always reads them.
         self._n_since_eloff = self.eloff_every
+
+        # time.perf_counter() of the START of block 0 that early_start sent
+        # at the end of the previous frame; None = nothing started
+        self._t_next: Optional[float] = None
 
         # This driver only ever talks to one kind of sensor, so the array type
         # and the TPArray describing its data layout are fixed
@@ -443,6 +466,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         state['_ee_enable'] = None
         state['_ee_level'] = None
         state['_start_armed'] = False
+        state['_t_next'] = None
         return state
 
     # --- class properties ---------------------------------------------------
@@ -508,6 +532,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
             self._spi.close()
             self._spi = None
             self._io = None
+            self._t_next = None
 
     # -- High-level public API -----------------------------------------------
 
@@ -577,6 +602,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
     def sleep(self) -> None:
         """Put sensor into sleep state (~11 uA standby current)."""
         self._write_register(_CMD_CONFIG, 0x00)
+        self._t_next = None         # an early-started conversion is aborted
 
     def wakeup(self) -> None:
         """Wake sensor from sleep state."""
@@ -625,12 +651,16 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         (see read_electrical_offsets(); the last BLIND conversion on the
         frames in between, see eloff_every) and 't_mono'.
         """
-        data = self.read_frame()                    # read pixels, atc, ptat, vdd
-
         # Fresh electrical offsets every eloff_every-th frame; the ones in
         # between reuse the last BLIND conversion (Section 15.3)
-        if self._n_since_eloff >= self.eloff_every:
-            data.update(self.read_electrical_offsets())   # read electrical offsets
+        blind = self._n_since_eloff >= self.eloff_every
+
+        # With early_start, the last conversion of this frame (block 11 or
+        # BLIND) starts the first one of the next frame
+        data = self.read_frame(start_next=self.early_start and not blind)
+
+        if blind:
+            data.update(self.read_electrical_offsets(start_next=self.early_start))
             self._eloff_raw_last = data['eloff_raw']
             self._n_since_eloff = 1
         else:
@@ -749,7 +779,7 @@ class SPI_HTPA160x120dR1(SPI_Driver):
 
     # -- Single Frame readout ------------------------------------------------
 
-    def read_frame(self) -> dict:
+    def read_frame(self, start_next: bool = False) -> dict:
         """
         Acquire one complete frame (12 blocks, top and bottom half).
 
@@ -761,6 +791,16 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         half in front of the pixel data (Tables 12 and 13), so no separate
         VDD measurement is required.
 
+        With warmup, a dummy conversion of block 0 comes first. If the
+        previous frame already started that first conversion (early_start),
+        it is only waited for.
+
+        Parameters
+        ----------
+        start_next : if True, START the first conversion of the next frame
+                     right after the last block has been read (see
+                     early_start; acquire_raw() decides).
+
         Returns
         -------
         dict with keys:
@@ -769,38 +809,69 @@ class SPI_HTPA160x120dR1(SPI_Driver):
                       followed by the 1606 data bytes
           "t"       - datetime.now() at function return
         """
-        t_block = self._calib["t_block"]        # ms, block conversion time
         io = self._io
 
+        # Write to configuration register:
+        # ---------------------------------------------------
+        # | 7 | 6 | 5 | 4 |   3   |  2  |   1   |   0    |
+        # |     BLOCK     | START | RFU | BLIND | WAKEUP |
+        # ---------------------------------------------------
+        # (config, buffer) of every conversion in order. The warm-up reads
+        # into the buffer of block 0, which block 0 then overwrites.
+        conversions = [(_BIT_WAKEUP | _BIT_START | (block << _SHIFT_BLOCK),
+                        io.xf_frame[block]) for block in range(_BLOCKS)]
+        if self.warmup:
+            conversions.insert(0, conversions[0])
+
+        # The first conversion (block 0, warm-up or not) may already run
+        t_start, self._t_next = self._t_next, None
+
         # --- Read in raw bytes of top and lower half from all 12 blocks ---
-        for block in range(_BLOCKS):
+        for config, xfers in conversions:
+            self._convert(config, xfers, t_start)
+            t_start = None
 
-            # Write to configuration register:
-            # ---------------------------------------------------
-            # | 7 | 6 | 5 | 4 |   3   |  2  |   1   |   0    |
-            # |     BLOCK     | START | RFU | BLIND | WAKEUP |
-            # ---------------------------------------------------
-            config = _BIT_WAKEUP | _BIT_START | (block << _SHIFT_BLOCK)
-
-            # Write to config register
-            self._write_register(_CMD_CONFIG, config)
-
-            # Pause 90 % of the approximate conversion time before checking
-            # if end of conversion is reached
-            time.sleep(0.9 * t_block * 1e-3)
-
-            # Start checking for end of conversion bit
-            self._wait_eoc()
-
-            # Read block straight into its row of the frame buffer
-            self._read_both_halves(io.xf_frame[block])
+        if start_next:
+            self._start_next_frame()
 
         # ------ Return -------------------------------------------------------
         # The one copy per frame: the buffer is overwritten by the next one
         return {'pix_raw': io.rx_frame.copy(), 't': datetime.now()}
 
+    def _convert(self, config: int, xfers, t_start: Optional[float] = None) -> None:
+        """
+        One conversion: write *config* (with START) to the config register,
+        wait for the end of conversion and read both halves into *xfers*.
+        If t_start (time.perf_counter()) is given, the conversion was
+        already started then and is only waited for.
+        """
+        if t_start is None:
+            self._write_register(_CMD_CONFIG, config)
+            t_start = time.perf_counter()
+
+        # Pause until 90 % of the approximate conversion time after the
+        # START before checking if end of conversion is reached
+        rest = t_start + 0.9 * self._calib["t_block"] * 1e-3 - time.perf_counter()
+        if rest > 0:
+            time.sleep(rest)
+
+        # Start checking for end of conversion bit
+        self._wait_eoc()
+
+        # Read block straight into its row of the frame buffer
+        self._read_both_halves(xfers)
+
+    def _start_next_frame(self) -> None:
+        """
+        early_start: START the first conversion of the next frame (block 0;
+        the warm-up if enabled, otherwise the real one) and remember when,
+        so that the next read_frame() only waits for it.
+        """
+        self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START)
+        self._t_next = time.perf_counter()
+
     # -- Electrical Offset Readout -------------------------------------------
-    def read_electrical_offsets(self) -> dict:
+    def read_electrical_offsets(self, start_next: bool = False) -> dict:
         """
         Trigger a BLIND conversion and read all 1600 electrical offset values
         (Tables 14 and 15).
@@ -809,26 +880,29 @@ class SPI_HTPA160x120dR1(SPI_Driver):
         the active pixels and the BLOCK setting is ignored, so a single pair
         of reads returns all offsets.
 
+        Parameters
+        ----------
+        start_next : if True, START the first conversion of the next frame
+                     right after the offsets have been read (see
+                     early_start; acquire_raw() decides).
+
         Returns
         -------
         dict with key "eloff_raw" -> uint8 array (2, 1607): half (0 = top,
         1 = bottom), byte 0 clocked in during the command followed by the
         1606 data bytes
         """
-        t_block = self._calib["t_block"]        # ms, block conversion time
+        # A conversion started early for the next frame has to end before
+        # a new one may start; its data are discarded, read_frame() then
+        # starts its first conversion itself
+        if self._t_next is not None:
+            self._convert(0, self._io.xf_frame[0], self._t_next)
+            self._t_next = None
 
-        # Write to config register
-        self._write_register(_CMD_CONFIG, _BIT_WAKEUP | _BIT_START | _BIT_BLIND)
+        self._convert(_BIT_WAKEUP | _BIT_START | _BIT_BLIND, self._io.xf_eloff)
 
-        # Pause 90 % of the approximate conversion time before checking
-        # if end of conversion is reached
-        time.sleep(0.9 * t_block * 1e-3)
-
-        # Start checking for end of conversion bit
-        self._wait_eoc()
-
-        # Read offsets from register
-        self._read_both_halves(self._io.xf_eloff)
+        if start_next:
+            self._start_next_frame()
 
         return {'eloff_raw': self._io.rx_eloff.copy()}
 
