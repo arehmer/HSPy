@@ -166,6 +166,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
 
     # One acquire_raw() plus its timing; runs in the acquiring thread
     raws, gap, dt_blocks, phase = [], [], [], []
+    intervals = []          # START-to-START before each of the 12 blocks
     rt_actual = []          # real-time priority the acquiring thread got
 
     def grab() -> dict:
@@ -194,6 +195,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
         else:
             gap.append(t_block[0] - starts[first - 1][0] if first else np.nan)
         dt_blocks.append(np.median(np.diff(t_block)))
+        intervals.append([gap[-1]] + list(np.diff(t_block)))
         raws.append((raw['pix_raw'], raw['eloff_raw']))   # references only
         return raw
 
@@ -239,6 +241,7 @@ def record(d, n_frames: int, gap_ms: float = 0.0,
                 ptat=np.array(ptat), vdd=np.array(vdd),
                 gap_ms=np.array(gap[:n]) * 1e3,
                 dt_blocks_ms=np.array(dt_blocks[:n]) * 1e3,
+                interval_ms=np.array(intervals[:n]) * 1e3,
                 phase=np.array(phase[:n]), eloff_every=d.eloff_every,
                 gap_max_ms=gap_ms if target is None else np.nan,
                 pipeline=target is not None,
@@ -346,6 +349,26 @@ def analyze(r) -> None:
         k, c0 = np.polyfit(g, b0, 1)
         print(f"\nBlock 0 (pix-eloff, rel. to blocks 1..11) vs. gap: "
               f"corr {np.corrcoef(g, b0)[0, 1]:+.2f}, slope {k:+.3f} digits/ms")
+    if 'interval_ms' in getattr(r, 'files', r):
+        # Timing inside the frame: START-to-START before every block, and
+        # whether the blocks follow their own preceding interval or the
+        # time elapsed since block 0 (a settling that builds up over the
+        # frame would show as tilt)
+        iv = r['interval_ms'][1:]
+        print("\nSTART-to-START before each block [ms]: median / std")
+        print("  " + " ".join(f"{v:5.1f}" for v in np.median(iv, axis=0)))
+        print("  " + " ".join(f"{v:5.2f}" for v in iv.std(axis=0)))
+        y = rel.mean(axis=1)[:, 1:]
+        x = iv[:, 1:] - iv[:, 1:].mean(axis=1, keepdims=True)
+        dy, dx = np.diff(y, axis=0).ravel(), np.diff(x, axis=0).ravel()
+        if np.std(dx) > 0:
+            print(f"Blocks 1..11 vs. their own preceding interval: "
+                  f"corr {np.corrcoef(dx, dy)[0, 1]:+.2f}, "
+                  f"slope {np.polyfit(dx, dy, 1)[0]:+.3f} digits/ms")
+        dur = iv[:, 1:].sum(axis=1)             # START block 0 -> START block 11
+        print(f"Frame duration (START block 0 -> 11): std {dur.std():.2f} ms; "
+              f"tilt slope vs. duration: corr "
+              f"{np.corrcoef(slope.mean(axis=1), dur)[0, 1]:+.2f}")
     print("Block 0 (pix-eloff, rel. to blocks 1..11) by frames since fresh eloff:")
     for p in np.unique(phase):
         sel = phase == p
