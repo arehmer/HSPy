@@ -175,7 +175,7 @@ def analyze(r) -> None:
     print("\nPTAT / VDD per block: frame-to-frame rms change [digits], "
           "block 0 vs. blocks 1..11")
     for name in ('ptat', 'vdd'):
-        a = r[name].reshape(n, 2, _BLOCKS).astype(np.float64)
+        a = r[name][1:].reshape(n, 2, _BLOCKS).astype(np.float64)
         s = np.sqrt((np.diff(a, axis=0) ** 2).mean(axis=(0, 1)) / 2)
         print(f"  {name}: block 0 {s[0]:.2f}, blocks 1..11 {s[1:].mean():.2f}")
 
